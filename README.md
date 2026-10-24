@@ -1,25 +1,20 @@
 # KeyPressMonitor (MASM Assembly)
 
-This repo has two programs:
+A 32-bit MASM program for Windows that watches key presses in real time and shows them on a live, full-screen dashboard.
 
-| Program | What it is |
-|---------|------------|
-| `KeyDashboard.asm` | **Main project.** A full-screen live dashboard with all three requirements plus extra features |
-| `KeyMonitor.asm` | The original simple version (prints a status line per key). Kept as a fallback |
-
-Both use only `kernel32.lib` and build with the same `build.bat`.
-
-## KeyDashboard
+It only uses `kernel32.lib`, so you **don't** need Irvine32 or the MASM32 SDK.
 
 ![Dashboard while typing](screenshots/dashboard.png)
 
-**Required features**
+## Features
+
+**Required**
 
 1. Counts **vowels and consonants** (big cards at the top, plus a vowel/consonant mix bar)
 2. **Frequency of every key** (A-Z histogram, top-5 table, and the full table in the report)
 3. Shows the **last N characters** typed (circular buffer; the newest key is highlighted)
 
-**Extra features**
+**Extra**
 
 | Feature | How it's done in MASM |
 |---------|-----------------------|
@@ -36,7 +31,7 @@ Both use only `kernel32.lib` and build with the same `build.bat`.
 | Pause | F3 stops counting (shown in the header and the button bar) |
 | Save report | F2 writes `KeyReport.txt` with `CreateFileA` / `WriteFile`; the same report is printed on exit |
 
-**Controls**
+## Controls
 
 | Key | Action |
 |-----|--------|
@@ -46,26 +41,11 @@ Both use only `kernel32.lib` and build with the same `build.bat`.
 | Left / Right, mouse wheel | Change N |
 | ESC | Quit and print the final report |
 
-The dashboard needs a console of at least 100 x 30 characters (the default Windows console is 120 x 30).
-If the colours look wrong in Windows Terminal, run it in the classic console instead: `conhost KeyDashboard.exe`.
+All buttons can also be clicked with the mouse.
 
 | Start | Paused, N = 24 |
 |-------|----------------|
 | ![Start](screenshots/start.png) | ![Paused](screenshots/paused.png) |
-
----
-
-## KeyMonitor (simple version)
-
-A simple 32-bit MASM program for Windows that watches key presses in real time and:
-
-1. Counts how many **vowels** and **consonants** you type
-2. Keeps a **frequency count** of every key you press
-3. Shows the **last 10 characters** you typed
-
-Press **ESC** to stop. You then get a final report with the frequency of each key.
-
-It only uses `kernel32.lib`, so you **don't** need Irvine32 or the MASM32 SDK.
 
 ---
 
@@ -96,61 +76,67 @@ build.bat
 Or build by hand:
 
 ```bat
-ml /c /coff KeyDashboard.asm
-link /subsystem:console KeyDashboard.obj kernel32.lib
+ml /c /coff KeyMonitor.asm
+link /subsystem:console KeyMonitor.obj kernel32.lib
 ```
-
-(Replace `KeyDashboard` with `KeyMonitor` for the simple version.)
 
 ## 4. Run
-
-```bat
-KeyDashboard.exe
-```
-
-or the simple version:
 
 ```bat
 KeyMonitor.exe
 ```
 
-## Sample output
+The dashboard needs a console of at least 100 x 30 characters (the default Windows console is 120 x 30).
+If the colours look wrong in Windows Terminal, run it in the classic console instead: `conhost KeyMonitor.exe`.
+
+## Sample report
+
+Printed when you press ESC, and saved to `KeyReport.txt` with F2:
 
 ```
-===== Real-Time Key Press Monitor (MASM) =====
-Start typing... Press ESC to stop.
+========== KEY PRESS MONITOR - REPORT ==========
+Total keys       : 137
+Total Vowels     : 37
+Total Consonants : 64
+Digits           : 6
+Spaces           : 26
+Symbols          : 3
+Other keys       : 1
+Peak WPM         : 88
+Average WPM      : 70
+Session time     : 00:23
+Last N chars     : [ easy peasy, see you at the demo]
 
-Key: h  | Vowels: 0  | Consonants: 1  | Last 10: [         h]
-Key: e  | Vowels: 1  | Consonants: 1  | Last 10: [        he]
-Key: l  | Vowels: 1  | Consonants: 2  | Last 10: [       hel]
-...
-
-========== FINAL REPORT ==========
-Total Vowels     : 1
-Total Consonants : 2
+Top 5 keys:
+  1.  SPC   x 26
+  2.  e     x 12
+  3.  o     x 9
+  4.  s     x 6
+  5.  a     x 5
 
 Key Frequency:
-  e      (ASCII 101)  ->  1
-  h      (ASCII 104)  ->  1
-  l      (ASCII 108)  ->  1
+  e    (ASCII 101)  ->  12
+  ...
 ```
-
-Non-printable keys (Enter, Tab, etc.) show as `.` in the "last 10" view and as `code` in the report.
 
 ## How it works (short)
 
 | Part | What it does |
 |------|--------------|
-| `SetConsoleMode(hIn, 0)` | Raw input: each key is read instantly, no Enter needed |
-| `ReadConsoleA` | Reads 1 key at a time |
+| `SetConsoleMode(hIn, 98h)` | Raw input with mouse events on (QuickEdit off), so keys and clicks arrive instantly |
+| `WaitForSingleObject` + `ReadConsoleInputA` | Waits up to 250 ms for input, so the screen keeps updating (timer, WPM) even when idle |
 | `freq` (256 DWORDs) | `freq[ascii]++` for every key |
-| `lastBuf` (10 bytes) | Shifted left with `rep movsb`, new key added at end |
+| `vkFreq` (256 DWORDs) | Count per virtual key, used by the keyboard heatmap |
+| `lastRing` (64 bytes) | Circular buffer of the last N keys; the index wraps with `AND 63` |
+| `tsRing` (128 DWORDs) | Time of each recent key press, used for WPM |
 | Vowel check | Converts letter to lowercase, compares with `"aeiou"` |
+| `canvas` | 100 x 30 cells drawn every frame, then copied to the screen in one call |
 
-To change how many last characters are shown, edit `N EQU 10` at the top of `KeyMonitor.asm`.
+To change the default N, edit `nView DD 32` in `KeyMonitor.asm` (8 to 64).
 
 ## Troubleshooting
 
 - **`'ml' is not recognized`** – you're not in the *x86 Native Tools Command Prompt*.
 - **`cannot open file 'kernel32.lib'`** – same reason; use the x86 Native Tools prompt.
-- Arrow / function keys don't produce ASCII characters, so they are ignored.
+- **Dashboard is cut off** – make the console window at least 100 x 30, or maximise it.
+- Arrow / function keys don't produce characters, so they are not counted (they're used as controls).
