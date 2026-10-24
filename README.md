@@ -1,5 +1,62 @@
 # KeyPressMonitor (MASM Assembly)
 
+This repo has two programs:
+
+| Program | What it is |
+|---------|------------|
+| `KeyDashboard.asm` | **Main project.** A full-screen live dashboard with all three requirements plus extra features |
+| `KeyMonitor.asm` | The original simple version (prints a status line per key). Kept as a fallback |
+
+Both use only `kernel32.lib` and build with the same `build.bat`.
+
+## KeyDashboard
+
+![Dashboard while typing](screenshots/dashboard.png)
+
+**Required features**
+
+1. Counts **vowels and consonants** (big cards at the top, plus a vowel/consonant mix bar)
+2. **Frequency of every key** (A-Z histogram, top-5 table, and the full table in the report)
+3. Shows the **last N characters** typed (circular buffer; the newest key is highlighted)
+
+**Extra features**
+
+| Feature | How it's done in MASM |
+|---------|-----------------------|
+| Flicker-free colour dashboard | Everything is drawn into a 100x30 `CHAR_INFO` array, then copied with one `WriteConsoleOutputA` call |
+| Custom colour theme | `SetConsoleScreenBufferInfoEx` replaces the 16 console colours; the original colours are restored on exit |
+| Big block-digit numbers | A 3x3 font made of CP437 block characters (`bigFont`) |
+| A-Z letter histogram | Bars use full and half blocks for double vertical resolution; vowels green, consonants amber |
+| Keyboard heatmap | QWERTY keys coloured cold to hot by how often each virtual key was pressed |
+| Typing speed | Live WPM (keys in the last 5 s), peak WPM, average WPM and a session timer via `GetTickCount` |
+| Top 5 keys | Selection over the 256-entry frequency table, with bars and percentages |
+| More categories | Separate counters for digits, spaces, symbols and other keys (Enter, Tab, Backspace...) |
+| Mouse buttons | `ReadConsoleInputA` mouse events: click Reset / Save / Pause / Quit, buttons highlight on hover |
+| Adjustable N | Left/Right arrows or the mouse wheel change N from 8 to 64 |
+| Pause | F3 stops counting (shown in the header and the button bar) |
+| Save report | F2 writes `KeyReport.txt` with `CreateFileA` / `WriteFile`; the same report is printed on exit |
+
+**Controls**
+
+| Key | Action |
+|-----|--------|
+| F1 | Reset all counters |
+| F2 | Save report to `KeyReport.txt` |
+| F3 | Pause / resume counting |
+| Left / Right, mouse wheel | Change N |
+| ESC | Quit and print the final report |
+
+The dashboard needs a console of at least 100 x 30 characters (the default Windows console is 120 x 30).
+If the colours look wrong in Windows Terminal, run it in the classic console instead: `conhost KeyDashboard.exe`.
+
+| Start | Paused, N = 24 |
+|-------|----------------|
+| ![Start](screenshots/start.png) | ![Paused](screenshots/paused.png) |
+
+---
+
+## KeyMonitor (simple version)
+
 A simple 32-bit MASM program for Windows that watches key presses in real time and:
 
 1. Counts how many **vowels** and **consonants** you type
@@ -39,11 +96,19 @@ build.bat
 Or build by hand:
 
 ```bat
-ml /c /coff KeyMonitor.asm
-link /subsystem:console KeyMonitor.obj kernel32.lib
+ml /c /coff KeyDashboard.asm
+link /subsystem:console KeyDashboard.obj kernel32.lib
 ```
 
+(Replace `KeyDashboard` with `KeyMonitor` for the simple version.)
+
 ## 4. Run
+
+```bat
+KeyDashboard.exe
+```
+
+or the simple version:
 
 ```bat
 KeyMonitor.exe
