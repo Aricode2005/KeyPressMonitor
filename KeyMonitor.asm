@@ -8,15 +8,21 @@
 ;   3. Shows the last N characters typed (buffered view)
 ;
 ;  Extra features:
-;   4. Full-screen colour dashboard, drawn off-screen and copied
-;      in one WriteConsoleOutputA call (no flicker), custom palette
+;   4. Full-screen dashboard in 24-bit colour: drawn off-screen, then
+;      sent as one WriteConsoleW call of VT escape sequences (no
+;      flicker). Gradients, 1/8-step bars, rounded panels. Falls back
+;      to 16 colours if the console has no VT support
 ;   5. Live A-Z letter histogram (vowels green, consonants amber)
 ;   6. Keyboard heatmap - QWERTY keys coloured by how often used
 ;   7. Typing speed: live WPM, peak WPM, average WPM, session timer
-;   8. Top-5 most used keys + digit / space / symbol counters
-;   9. Mouse-clickable buttons, adjustable N, pause, save report
+;   8. Top-5 keys, plus top-5 bigrams and trigrams (n-gram tracker)
+;   9. Digit / space / symbol / word counters, longest word,
+;      backspace correction rate
+;  10. WPM history graph for the last 52 seconds
+;  11. Mouse-clickable buttons, adjustable N, pause, save report,
+;      autosave on exit
 ;
-;  Keys:  F1 reset   F2 save report   F3 pause   ESC quit
+;  Keys:  F1 reset   F2 save report   F3 pause   F4 autosave   ESC quit
 ;         Left / Right arrow (or mouse wheel) change N
 ;
 ;  Uses only kernel32.lib (comes with Visual Studio / Windows SDK).
@@ -34,7 +40,9 @@ ReadConsoleInputA             PROTO :DWORD, :DWORD, :DWORD, :DWORD
 GetNumberOfConsoleInputEvents PROTO :DWORD, :DWORD
 WaitForSingleObject           PROTO :DWORD, :DWORD
 WriteConsoleA                 PROTO :DWORD, :DWORD, :DWORD, :DWORD, :DWORD
-WriteConsoleOutputA           PROTO :DWORD, :DWORD, :DWORD, :DWORD, :DWORD
+WriteConsoleW                 PROTO :DWORD, :DWORD, :DWORD, :DWORD, :DWORD
+WriteConsoleOutputW           PROTO :DWORD, :DWORD, :DWORD, :DWORD, :DWORD
+GetEnvironmentVariableA       PROTO :DWORD, :DWORD, :DWORD
 FillConsoleOutputCharacterA   PROTO :DWORD, :DWORD, :DWORD, :DWORD, :DWORD
 FillConsoleOutputAttribute    PROTO :DWORD, :DWORD, :DWORD, :DWORD, :DWORD
 SetConsoleCursorPosition      PROTO :DWORD, :DWORD
@@ -72,11 +80,14 @@ SCR_H             EQU 30
 NMAX              EQU 64          ; largest N (power of two -> wrap with AND)
 NMIN              EQU 8
 TS_SIZE           EQU 128         ; key timestamps kept for WPM
-HIST_N            EQU 60          ; WPM history: one sample per second, last 60 s
+HIST_N            EQU 52          ; WPM history: one sample per second, last 52 s
 HIST_SIZE         EQU 64          ; ring size (power of two)
 WPM_WINDOW        EQU 5000        ; WPM measured over the last 5 seconds
 MSG_TIME          EQU 3000        ; status message shown for 3 seconds
-BTN_Y             EQU 27          ; row of the button bar
+BTN_Y             EQU 28          ; row of the button bar
+NBTN              EQU 5           ; number of buttons
+NG2               EQU 26 * 26     ; possible bigrams (a-z)
+NG3               EQU 26 * 26 * 26 ; possible trigrams
 
 CAT_VOWEL         EQU 1
 CAT_CONS          EQU 2
@@ -85,30 +96,42 @@ CAT_SPACE         EQU 4
 CAT_SYM           EQU 5
 CAT_OTHER         EQU 6
 
-; ---------- colour attributes (foreground + background*16) ----------
-; palette index: 0 page  1 panel  2 green  3 cyan  4 red  5 purple
-;                6 amber 7 text   8 muted  9 blue  11 header  12 orange
-;                14 yellow 15 white
-A_PAGE            EQU 07h
-A_MUTED_PG        EQU 08h
-A_PANEL           EQU 17h
-A_PANEL_HI        EQU 1Fh
-A_BORDER          EQU 18h
-A_VOWEL           EQU 12h
-A_CONS            EQU 16h
-A_CYAN            EQU 13h
-A_PURPLE          EQU 15h
-A_NEWEST          EQU 30h
-A_HDR             EQU 0B7h
-A_HDR_HI          EQU 0BFh
-A_HDR_ACC         EQU 0B3h
-A_HDR_OK          EQU 0B2h
-A_HDR_WARN        EQU 0BEh
-A_BTN             EQU 9Fh
-A_BTN_HOT         EQU 30h
-A_BTN_QUIT        EQU 4Fh
-A_BTN_QHOT        EQU 0C0h
-A_BTN_PAUSED      EQU 0E0h
+VT_OUTPUT         EQU 4           ; ENABLE_VIRTUAL_TERMINAL_PROCESSING
+CARD_SIZE         EQU 16          ; per-second samples for the card sparklines
+CARD_MASK         EQU CARD_SIZE - 1
+A_PAGE            EQU 07h         ; console attribute used to clear the window
+
+; ---------- colours (COLORREF = 00BBGGRRh) ----------
+C_KEEP      EQU 0FFFFFFFFh ; leave the cell's colour unchanged
+C_PAGE      EQU 01A0E0Bh  ; #0B0E1A
+C_PANEL     EQU 0291712h  ; #121729
+C_BORDER    EQU 052332Ah  ; #2A3352
+C_TRACK     EQU 038221Ch  ; #1C2238
+C_AXIS      EQU 0452A23h  ; #232A45
+C_OFFKEY    EQU 040261Fh  ; #1F2640
+C_TEXT      EQU 0F0E8E2h  ; #E2E8F0
+C_MUTED     EQU 08B7464h  ; #64748B
+C_DIM       EQU 066453Bh  ; #3B4566
+C_WHITE     EQU 0FFFFFFh  ; #FFFFFF
+C_BLACK     EQU 0000000h  ; #000000
+C_GREEN     EQU 0B7E76Eh  ; #6EE7B7
+C_GREEN2    EQU 0699605h  ; #059669
+C_AMBER     EQU 04DD3FCh  ; #FCD34D
+C_AMBER2    EQU 00C58EAh  ; #EA580C
+C_CYAN      EQU 0F9E867h  ; #67E8F9
+C_CYAN2     EQU 0B29108h  ; #0891B2
+C_PURP      EQU 0FDB5C4h  ; #C4B5FD
+C_PURP2     EQU 0ED3A7Ch  ; #7C3AED
+C_PINK      EQU 0B672F4h  ; #F472B6
+C_OK        EQU 080DE4Ah  ; #4ADE80
+C_GOLD      EQU 015CCFAh  ; #FACC15
+C_BRONZE    EQU 03C92FBh  ; #FB923C
+C_RED       EQU 0481DE1h  ; #E11D48
+C_BLUE      EQU 0EB6325h  ; #2563EB
+C_PAUSEBTN  EQU 0048ACAh  ; #CA8A04
+C_HDR1      EQU 04B1B1Eh  ; #1E1B4B
+C_HDR2      EQU 0B6215Bh  ; #5B21B6
+C_HDRTXT    EQU 0FED2C7h  ; #C7D2FE
 
 .data
 hIn          DD ?
@@ -122,6 +145,10 @@ bufW         DD SCR_W
 bufH         DD SCR_H
 offX         DD 0                 ; dashboard is centred horizontally
 writeRegion  DW 0, 0, 0, 0        ; SMALL_RECT
+oldOutMode   DD 0
+vtOK         DD 0                 ; console understands VT escape sequences
+fineGlyphs   DD 0                 ; font has 1/8 blocks (Windows Terminal)
+vtLen        DD 0                 ; characters in vtBuf
 
 ; ---- statistics ----
 vowels       DD 0
@@ -142,6 +169,11 @@ wpmHist      DD HIST_SIZE DUP(0)  ; WPM sampled once per second
 histHead     DD 0
 histCount    DD 0
 lastSample   DD 0
+cardV        DD CARD_SIZE DUP(0)  ; vowels / consonants / total, once per second
+cardC        DD CARD_SIZE DUP(0)
+cardT        DD CARD_SIZE DUP(0)
+cardHead     DD 0
+cardCount    DD 0
 freq         DD 256 DUP(0)        ; frequency table, indexed by ASCII code
 vkFreq       DD 256 DUP(0)        ; frequency by virtual key (for the heatmap)
 lastRing     DB NMAX DUP(0)       ; last N characters, circular buffer
@@ -165,16 +197,24 @@ heatMax      DD 1
 top5Key      DD 5 DUP(0)
 top5Cnt      DD 5 DUP(0)
 top5N        DD 0
+bi5Idx       DD 5 DUP(0)          ; top bigrams: index = a*26 + b
+bi5Cnt       DD 5 DUP(0)
+bi5N         DD 0
+tri5Idx      DD 5 DUP(0)          ; top trigrams: index = (a*26 + b)*26 + c
+tri5Cnt      DD 5 DUP(0)
+tri5N        DD 0
+prevL1       DD -1                ; previous letter (0-25), -1 = none
+prevL2       DD -1                ; letter before that
 
 paused       DD 0
 quitFlag     DD 0
 mouseX       DD -1
 mouseY       DD -1
-btnX         DD 4 DUP(0)
-btnW         DD 4 DUP(0)
+btnX         DD NBTN DUP(0)
+btnW         DD NBTN DUP(0)
 msgPtr       DD 0
 msgTick      DD 0
-msgAttr      DD 0
+msgColor     DD 0
 
 nEvents      DD 0
 nRead        DD 0
@@ -182,13 +222,33 @@ nWritten     DD 0
 inRec        DB 20 DUP(0)         ; INPUT_RECORD
 numBuf       DB 16 DUP(0)
 keyNameBuf   DB 4 DUP(0)
+ngBuf        DB 4 DUP(0)
 rptLen       DD 0
+envBuf       DB 64 DUP(0)
 
-; ---- custom colour theme (COLORREF = 00BBGGRRh) ----
-palette      DD 0020100Dh, 002E1B16h, 0099D334h, 00EED322h
-             DD 005E3FF4h, 00FA8BA7h, 000B9EF5h, 00E1D5CBh
-             DD 0088675Bh, 00F6823Bh, 0081B910h, 00552A1Eh
-             DD 003C92FBh, 009948ECh, 0015CCFAh, 00FCFAF8h
+; ---- colours: heatmap ramp, 16-colour fallback palette, rank medals ----
+heatStops    DD 0D84E1Dh, 0D4B606h, 081B910h, 015CCFAh, 01673F9h, 0481DE1h   ; cold -> hot
+palette      DD 01A0E0Bh, 0291712h, 099D334h, 0EED322h, 0481DE1h, 0FA8BA7h, 00B9EF5h, 0F0E8E2h
+             DD 08B7464h, 0EB6325h, 0699605h, 08C1F3Bh, 066443Ah, 0B672F4h, 015CCFAh, 0FFFFFFh   ; 12 = border grey
+; ---- CP437 bytes 80h-FFh -> Unicode (used to draw byte strings) ----
+cp437W       DW 000C7h, 000FCh, 000E9h, 000E2h, 000E4h, 000E0h, 000E5h, 000E7h
+             DW 000EAh, 000EBh, 000E8h, 000EFh, 000EEh, 000ECh, 000C4h, 000C5h
+             DW 000C9h, 000E6h, 000C6h, 000F4h, 000F6h, 000F2h, 000FBh, 000F9h
+             DW 000FFh, 000D6h, 000DCh, 000A2h, 000A3h, 000A5h, 020A7h, 00192h
+             DW 000E1h, 000EDh, 000F3h, 000FAh, 000F1h, 000D1h, 000AAh, 000BAh
+             DW 000BFh, 02310h, 000ACh, 000BDh, 000BCh, 000A1h, 000ABh, 000BBh
+             DW 02591h, 02592h, 02593h, 02502h, 02524h, 02561h, 02562h, 02556h
+             DW 02555h, 02563h, 02551h, 02557h, 0255Dh, 0255Ch, 0255Bh, 02510h
+             DW 02514h, 02534h, 0252Ch, 0251Ch, 02500h, 0253Ch, 0255Eh, 0255Fh
+             DW 0255Ah, 02554h, 02569h, 02566h, 02560h, 02550h, 0256Ch, 02567h
+             DW 02568h, 02564h, 02565h, 02559h, 02558h, 02552h, 02553h, 0256Bh
+             DW 0256Ah, 02518h, 0250Ch, 02588h, 02584h, 0258Ch, 02590h, 02580h
+             DW 003B1h, 000DFh, 00393h, 003C0h, 003A3h, 003C3h, 000B5h, 003C4h
+             DW 003A6h, 00398h, 003A9h, 003B4h, 0221Eh, 003C6h, 003B5h, 02229h
+             DW 02261h, 000B1h, 02265h, 02264h, 02320h, 02321h, 000F7h, 02248h
+             DW 000B0h, 02219h, 000B7h, 0221Ah, 0207Fh, 000B2h, 025A0h, 000A0h
+
+rankColors   DD C_GOLD, C_TEXT, C_BRONZE, C_MUTED, C_MUTED   ; gold, silver, bronze
 
 ; ---- 3x3 block font for the big numbers (CP437 blocks) ----
 bigFont      DB 0DBh,0DFh,0DBh, 0DBh,020h,0DBh, 0DFh,0DFh,0DFh   ; 0
@@ -201,9 +261,6 @@ bigFont      DB 0DBh,0DFh,0DBh, 0DBh,020h,0DBh, 0DFh,0DFh,0DFh   ; 0
              DB 0DFh,0DFh,0DBh, 020h,020h,0DBh, 020h,020h,0DFh   ; 7
              DB 0DBh,0DFh,0DBh, 0DBh,0DFh,0DBh, 0DFh,0DFh,0DFh   ; 8
              DB 0DBh,0DFh,0DBh, 0DFh,0DFh,0DBh, 0DFh,0DFh,0DFh   ; 9
-
-heatAttrs    DB 08h, 9Fh, 30h, 20h, 0E0h, 4Fh   ; cold -> hot
-rankAttrs    DB 1Eh, 1Fh, 1Ch, 18h, 18h         ; gold, silver, bronze
 
 ; ---- keyboard layout: labels, virtual key codes, x, y ----
 kbL0         DB "1234567890-=", 0
@@ -230,7 +287,7 @@ sTime        DB "TIME ", 0
 sCardV       DB " VOWELS ", 0
 sCardC       DB " CONSONANTS ", 0
 sCardT       DB " TOTAL KEYS ", 0
-sCardW       DB " SPEED  WPM ", 0
+sCardW       DB " SPEED ", 0FAh, " WPM ", 0
 sPctLetters  DB "% of letters", 0
 sKeysSession DB "keys this session", 0
 sPeak        DB "peak ", 0
@@ -243,15 +300,8 @@ sWords       DB "WORDS ", 0
 sLongest     DB "LONGEST WORD ", 0
 sBackspaces  DB "   BACKSPACES ", 0
 sErrRate     DB "   CORRECTION RATE ", 0
-sAuto        DB "F4 AUTOSAVE ", 0
-sOn          DB "ON", 0
-sOff         DB "OFF", 0
-sHistory     DB "WPM HISTORY  last 60 s", 0
-sHistMax     DB "max ", 0
 sMsgAutoOn   DB 0FBh, " Report will be saved on exit", 0
 sMsgAutoOff  DB "x Autosave off", 0
-histChars    DB 0FAh, 0DCh, 0DBh, 0DBh
-histAttrs    DB 08h, 05h, 05h, 0Fh
 sBoxLast     DB " LAST N CHARACTERS ", 0
 sNEq         DB " N = ", 0
 sNHint       DB "  (<- ->  or mouse wheel) ", 0
@@ -261,20 +311,34 @@ sBoxHist     DB " LETTER FREQUENCY  A-Z ", 0
 sVowel       DB "vowel", 0
 sConsonant   DB "consonant", 0
 sMax         DB "max ", 0
+sMaxB        DB " max ", 0           ; on a box border
 sBoxHeat     DB " KEYBOARD HEATMAP ", 0
 sSpace       DB "SPACE", 0
 sCold        DB " cold ", 0
 sHot         DB " hot ", 0
-sBoxTop      DB " TOP 5 KEYS ", 0
+sBoxRank     DB " TOP 5 ", 0
+sHdrKey      DB "KEY", 0
+sHdrBi       DB "BIGRAM", 0
+sHdrTri      DB "TRIGRAM", 0
+sBoxWpm      DB " WPM HISTORY  last 52 s ", 0
 sDash        DB "-", 0
-sBtn0        DB " F1  RESET ", 0
-sBtn1        DB " F2  SAVE REPORT ", 0
-sBtn2        DB " F3  PAUSE ", 0
-sBtnResume   DB " F3  RESUME ", 0
-sBtn3        DB " ESC  QUIT ", 0
-btnLabels    DD OFFSET sBtn0, OFFSET sBtn1, OFFSET sBtn2, OFFSET sBtn3
-btnAttrs     DB A_BTN, A_BTN, A_BTN, A_BTN_QUIT
-btnHot       DB A_BTN_HOT, A_BTN_HOT, A_BTN_HOT, A_BTN_QHOT
+; buttons in screen order: key, name, colour; btnAction maps each to a DoAction id
+sBK0         DB " F1 ", 0
+sBK1         DB " F2 ", 0
+sBK2         DB " F3 ", 0
+sBK3         DB " F4 ", 0
+sBK4         DB " ESC ", 0
+sBN0         DB " Reset ", 0
+sBN1         DB " Save report ", 0
+sBN2         DB " Pause ", 0
+sBN2R        DB " Resume ", 0
+sBN3         DB " Autosave off ", 0
+sBN3On       DB " Autosave on ", 0
+sBN4         DB " Quit ", 0
+btnKeys      DD OFFSET sBK0, OFFSET sBK1, OFFSET sBK2, OFFSET sBK3, OFFSET sBK4
+btnNames     DD OFFSET sBN0, OFFSET sBN1, OFFSET sBN2, OFFSET sBN3, OFFSET sBN4
+btnColors    DD C_BLUE, C_BLUE, C_BLUE, C_BLUE, C_RED
+btnAction    DB 0, 1, 2, 4, 3
 sHint        DB "Mouse: click the buttons  ", 0FAh, "  <- -> or wheel: resize N  ", 0FAh
              DB "  keys are counted only while LIVE", 0
 sMsgReset    DB 0FBh, " Counters reset", 0
@@ -288,6 +352,16 @@ sENT         DB "ENT", 0
 sTAB         DB "TAB", 0
 sBSP         DB "BSP", 0
 sEXT         DB "EXT", 0
+sWtEnv       DB "WT_SESSION", 0        ; set when running inside Windows Terminal
+
+; ---- VT escape sequences ----
+vtCsi        DB 27, "[", 0
+vtFg         DB "38;2;", 0
+vtBg         DB ";48;2;", 0
+vtFrame      DB 27, "[?2026h", 27, "[?25l", 0     ; begin synchronised frame, hide cursor
+vtFrameEnd   DB 27, "[?2026l", 0
+vtClear      DB 27, "[48;2;11;14;26m", 27, "[2J", 0 ; fill the window with the page colour
+vtReset      DB 27, "[0m", 27, "[2J", 27, "[H", 27, "[?25h", 0
 
 ; ---- report text (saved with F2 and printed on exit) ----
 rpTitle      DB 13, 10, "========== KEY PRESS MONITOR - REPORT ==========", 13, 10, 0
@@ -308,6 +382,8 @@ rpTime       DB "Session time     : ", 0
 rpLast       DB "Last N chars     : [", 0
 rpLastEnd    DB "]", 13, 10, 0
 rpTop        DB 13, 10, "Top 5 keys:", 13, 10, 0
+rpBi         DB 13, 10, "Top 5 bigrams:", 13, 10, 0
+rpTri        DB 13, 10, "Top 5 trigrams:", 13, 10, 0
 rpFreq       DB 13, 10, "Key Frequency:", 13, 10, 0
 rpIndent     DB "  ", 0
 rpDot        DB ".  ", 0
@@ -318,77 +394,102 @@ crlf         DB 13, 10, 0
 sBye         DB 13, 10, "Press any key to exit...", 0
 
 .data?
-canvas       DD SCR_W * SCR_H DUP(?)   ; CHAR_INFO cells: char (low word), attr (high word)
+canvas       DD SCR_W * SCR_H * 3 DUP(?) ; cells: Unicode char, foreground, background
+vtBuf        DW 131072 DUP(?)          ; one frame of VT output (UTF-16)
+legacyBuf    DD SCR_W * SCR_H DUP(?)   ; CHAR_INFO cells for the 16-colour fallback
 csbiOld      DB 96 DUP(?)              ; CONSOLE_SCREEN_BUFFER_INFOEX
 csbiNew      DB 96 DUP(?)
 rptBuf       DB 16384 DUP(?)
+bigrams      DD NG2 DUP(?)            ; count of every letter pair
+trigrams     DD NG3 DUP(?)            ; count of every letter triple
 
 .code
 
 ; =============================================================
-;  Canvas primitives - everything is drawn into 'canvas' first
+;  Canvas primitives - everything is drawn into 'canvas' first.
+;  A cell is 3 DWORDs: Unicode character, foreground colour and
+;  background colour (COLORREF 00BBGGRRh). C_KEEP leaves a colour
+;  unchanged, so text can be drawn over a panel or gradient.
 ; =============================================================
 
-; ---- put one character with colour (clipped to the canvas) ----
-PutCh PROC px:DWORD, py:DWORD, chv:DWORD, attr:DWORD
+; ---- put one character with colours (clipped to the canvas) ----
+Cell PROC px:DWORD, py:DWORD, chv:DWORD, fg:DWORD, bg:DWORD
     mov  eax, px
     cmp  eax, SCR_W
-    jae  pc_done
+    jae  ce_done
     mov  edx, py
     cmp  edx, SCR_H
-    jae  pc_done
+    jae  ce_done
     imul edx, edx, SCR_W
     add  edx, eax
-    mov  eax, attr
-    shl  eax, 16
-    mov  ecx, chv
-    and  ecx, 0FFh
-    or   eax, ecx
+    lea  edx, [edx+edx*2]           ; 3 DWORDs per cell
+    mov  eax, chv
     mov  canvas[edx*4], eax
-pc_done:
+    mov  eax, fg
+    cmp  eax, C_KEEP
+    je   ce_bg
+    mov  canvas[edx*4+4], eax
+ce_bg:
+    mov  eax, bg
+    cmp  eax, C_KEEP
+    je   ce_done
+    mov  canvas[edx*4+8], eax
+ce_done:
     ret
-PutCh ENDP
+Cell ENDP
 
-; ---- fill a rectangle with one character / colour ----
-FillRect PROC USES ebx esi px:DWORD, py:DWORD, wd:DWORD, ht:DWORD, chv:DWORD, attr:DWORD
+; ---- CP437 byte (as used in our strings) -> Unicode character ----
+GlyphW PROC b:DWORD
+    mov  eax, b
+    and  eax, 0FFh
+    cmp  eax, 80h
+    jb   gw_done
+    movzx eax, cp437W[eax*2 - 100h]
+gw_done:
+    ret
+GlyphW ENDP
+
+; ---- fill a rectangle with one character / colours ----
+Fill PROC USES ebx esi px:DWORD, py:DWORD, wd:DWORD, ht:DWORD, chv:DWORD, fg:DWORD, bg:DWORD
     xor  esi, esi
-fr_row:
+fi_row:
     cmp  esi, ht
-    jae  fr_done
+    jae  fi_done
     xor  ebx, ebx
-fr_col:
+fi_col:
     cmp  ebx, wd
-    jae  fr_next
+    jae  fi_next
     mov  eax, px
     add  eax, ebx
     mov  edx, py
     add  edx, esi
-    invoke PutCh, eax, edx, chv, attr
+    invoke Cell, eax, edx, chv, fg, bg
     inc  ebx
-    jmp  fr_col
-fr_next:
+    jmp  fi_col
+fi_next:
     inc  esi
-    jmp  fr_row
-fr_done:
+    jmp  fi_row
+fi_done:
     ret
-FillRect ENDP
+Fill ENDP
 
-; ---- put zero-terminated string; returns eax = x after the text ----
-PutStr PROC USES ebx esi px:DWORD, py:DWORD, pStr:DWORD, attr:DWORD
+; ---- zero-terminated byte string; returns eax = x after the text ----
+Text PROC USES ebx esi px:DWORD, py:DWORD, pStr:DWORD, fg:DWORD, bg:DWORD
     mov  esi, pStr
     mov  ebx, px
-ps_loop:
+tx_loop:
     movzx eax, BYTE PTR [esi]
     test eax, eax
-    jz   ps_done
-    invoke PutCh, ebx, py, eax, attr
+    jz   tx_done
+    invoke GlyphW, eax
+    invoke Cell, ebx, py, eax, fg, bg
     inc  esi
     inc  ebx
-    jmp  ps_loop
-ps_done:
+    jmp  tx_loop
+tx_done:
     mov  eax, ebx
     ret
-PutStr ENDP
+Text ENDP
 
 ; ---- length of zero-terminated string ----
 StrLen PROC pStr:DWORD
@@ -424,104 +525,166 @@ nts_loop:
 NumToStr ENDP
 
 ; ---- number, left aligned; returns eax = x after the text ----
-PutNum PROC px:DWORD, py:DWORD, val:DWORD, attr:DWORD
+Num PROC px:DWORD, py:DWORD, val:DWORD, fg:DWORD
     invoke NumToStr, val
-    invoke PutStr, px, py, eax, attr
+    invoke Text, px, py, eax, fg, C_KEEP
     ret
-PutNum ENDP
+Num ENDP
 
 ; ---- number, right aligned so its last digit is at column pxr ----
-PutNumR PROC pxr:DWORD, py:DWORD, val:DWORD, attr:DWORD
+NumR PROC pxr:DWORD, py:DWORD, val:DWORD, fg:DWORD
     invoke NumToStr, val
     mov  edx, pxr
     sub  edx, ecx
     inc  edx
-    invoke PutStr, edx, py, eax, attr
+    invoke Text, edx, py, eax, fg, C_KEEP
     ret
-PutNumR ENDP
+NumR ENDP
 
 ; ---- two digits with leading zero (0-99) ----
-Put2 PROC px:DWORD, py:DWORD, val:DWORD, attr:DWORD
+Two PROC px:DWORD, py:DWORD, val:DWORD, fg:DWORD
     mov  eax, val
     xor  edx, edx
     mov  ecx, 10
     div  ecx
     push edx
     add  eax, '0'
-    invoke PutCh, px, py, eax, attr
+    invoke Cell, px, py, eax, fg, C_KEEP
     pop  edx
     add  edx, '0'
     mov  eax, px
     inc  eax
-    invoke PutCh, eax, py, edx, attr
+    invoke Cell, eax, py, edx, fg, C_KEEP
     ret
-Put2 ENDP
+Two ENDP
 
 ; ---- seconds as mm:ss ----
-PutTime PROC px:DWORD, py:DWORD, secs:DWORD, attr:DWORD
+TimeMS PROC px:DWORD, py:DWORD, secs:DWORD, fg:DWORD
     mov  eax, secs
     xor  edx, edx
     mov  ecx, 60
     div  ecx
     cmp  eax, 99
-    jbe  pt_ok
+    jbe  tm_ok
     mov  eax, 99
-pt_ok:
+tm_ok:
     push edx
-    invoke Put2, px, py, eax, attr
+    invoke Two, px, py, eax, fg
     mov  eax, px
     add  eax, 2
-    invoke PutCh, eax, py, ':', attr
+    invoke Cell, eax, py, ':', fg, C_KEEP
     pop  edx
     mov  eax, px
     add  eax, 3
-    invoke Put2, eax, py, edx, attr
+    invoke Two, eax, py, edx, fg
     ret
-PutTime ENDP
+TimeMS ENDP
 
-; ---- panel with a single-line border and a title in the top edge ----
-DrawBox PROC USES ebx esi edi px:DWORD, py:DWORD, wd:DWORD, ht:DWORD, pTitle:DWORD, battr:DWORD, tattr:DWORD
-    invoke FillRect, px, py, wd, ht, ' ', A_PANEL
+; ---- blend two colours: c1 + (c2 - c1) * t / tmax, per channel ----
+Lerp PROC USES ebx esi edi c1:DWORD, c2:DWORD, t:DWORD, tmax:DWORD
+    mov  eax, c1                    ; empty range -> first colour
+    cmp  tmax, 0
+    jle  lp_ret
+    mov  eax, t                     ; clamp t to 0..tmax
+    cmp  eax, tmax
+    jle  lp_lo
+    mov  eax, tmax
+lp_lo:
+    test eax, eax
+    jns  lp_t
+    xor  eax, eax
+lp_t:
+    mov  t, eax
+    xor  edi, edi                   ; result
+    xor  esi, esi                   ; channel shift: 0, 8, 16
+lp_ch:
+    mov  ecx, esi
+    mov  eax, c1
+    shr  eax, cl
+    and  eax, 0FFh
+    mov  ebx, c2
+    shr  ebx, cl
+    and  ebx, 0FFh
+    sub  ebx, eax                   ; signed difference
+    push eax
+    mov  eax, ebx
+    imul t
+    idiv tmax
+    pop  ebx
+    add  eax, ebx
+    and  eax, 0FFh
+    mov  ecx, esi
+    shl  eax, cl
+    or   edi, eax
+    add  esi, 8
+    cmp  esi, 24
+    jb   lp_ch
+    mov  eax, edi
+lp_ret:
+    ret
+Lerp ENDP
+
+; ---- colour at position t/tmax along a list of colour stops ----
+Ramp PROC USES ebx pStops:DWORD, nStops:DWORD, t:DWORD, tmax:DWORD
+    mov  eax, nStops
+    dec  eax
+    mul  t                          ; segment position = t * (n-1)
+    div  tmax                       ; eax = stop index, edx = remainder
+    mov  ecx, nStops
+    sub  ecx, 2
+    cmp  eax, ecx
+    jbe  rp_ok
+    mov  eax, ecx                   ; t = tmax -> end of the last segment
+    mov  edx, tmax
+rp_ok:
+    mov  ebx, pStops
+    invoke Lerp, DWORD PTR [ebx+eax*4], DWORD PTR [ebx+eax*4+4], edx, tmax
+    ret
+Ramp ENDP
+
+; ---- panel with a rounded border and a title in the top edge ----
+RBox PROC USES ebx esi edi px:DWORD, py:DWORD, wd:DWORD, ht:DWORD, pTitle:DWORD, bc:DWORD, tc:DWORD
+    invoke Fill, px, py, wd, ht, ' ', C_TEXT, C_PANEL
     mov  esi, px
     add  esi, wd
-    dec  esi                      ; esi = right column
+    dec  esi                        ; esi = right column
     mov  edi, py
     add  edi, ht
-    dec  edi                      ; edi = bottom row
+    dec  edi                        ; edi = bottom row
     mov  ebx, px
-box_h:
+rb_h:
     cmp  ebx, esi
-    ja   box_v0
-    invoke PutCh, ebx, py, 0C4h, battr
-    invoke PutCh, ebx, edi, 0C4h, battr
+    ja   rb_v0
+    invoke Cell, ebx, py, 2500h, bc, C_KEEP
+    invoke Cell, ebx, edi, 2500h, bc, C_KEEP
     inc  ebx
-    jmp  box_h
-box_v0:
+    jmp  rb_h
+rb_v0:
     mov  ebx, py
-box_v:
+rb_v:
     cmp  ebx, edi
-    ja   box_c
-    invoke PutCh, px, ebx, 0B3h, battr
-    invoke PutCh, esi, ebx, 0B3h, battr
+    ja   rb_c
+    invoke Cell, px, ebx, 2502h, bc, C_KEEP
+    invoke Cell, esi, ebx, 2502h, bc, C_KEEP
     inc  ebx
-    jmp  box_v
-box_c:
-    invoke PutCh, px, py, 0DAh, battr
-    invoke PutCh, esi, py, 0BFh, battr
-    invoke PutCh, px, edi, 0C0h, battr
-    invoke PutCh, esi, edi, 0D9h, battr
+    jmp  rb_v
+rb_c:
+    invoke Cell, px, py, 256Dh, bc, C_KEEP      ; rounded corners
+    invoke Cell, esi, py, 256Eh, bc, C_KEEP
+    invoke Cell, px, edi, 2570h, bc, C_KEEP
+    invoke Cell, esi, edi, 256Fh, bc, C_KEEP
     cmp  pTitle, 0
-    je   box_done
+    je   rb_done
     mov  eax, px
     add  eax, 2
-    invoke PutStr, eax, py, pTitle, tattr
-box_done:
+    invoke Text, eax, py, pTitle, tc, C_KEEP
+rb_done:
     ret
-DrawBox ENDP
+RBox ENDP
 
-; ---- big 3-row number using the block font ----
-BigNum PROC USES ebx esi edi px:DWORD, py:DWORD, val:DWORD, attr:DWORD
-    LOCAL row:DWORD, col:DWORD
+; ---- big 3-row number; colour fades from c1 (top) to c2 (bottom) ----
+BigNum PROC USES ebx esi edi px:DWORD, py:DWORD, val:DWORD, c1:DWORD, c2:DWORD
+    LOCAL row:DWORD, col:DWORD, rc:DWORD
     invoke NumToStr, val
     mov  esi, eax
     mov  ebx, px
@@ -534,14 +697,20 @@ bn_digit:
     add  edi, OFFSET bigFont
     mov  row, 0
 bn_row:
+    invoke Lerp, c1, c2, row, 2
+    mov  rc, eax
     mov  col, 0
 bn_col:
     movzx eax, BYTE PTR [edi]
+    cmp  eax, ' '
+    je   bn_skip
+    invoke GlyphW, eax
     mov  ecx, ebx
     add  ecx, col
     mov  edx, py
     add  edx, row
-    invoke PutCh, ecx, edx, eax, attr
+    invoke Cell, ecx, edx, eax, rc, C_KEEP
+bn_skip:
     inc  edi
     inc  col
     cmp  col, 3
@@ -556,15 +725,304 @@ bn_done:
     ret
 BigNum ENDP
 
-; ---- copy the finished canvas to the console in one call ----
-Flush PROC
+; ---- vertical bar cell: e = filled eighths (1-8) -> block character ----
+Eighth PROC e:DWORD
+    mov  eax, e
+    cmp  eax, 8
+    jb   eg_part
+    mov  eax, 2588h                 ; full block
+    ret
+eg_part:
+    add  eax, 2580h                 ; U+2581..U+2587 lower blocks
+    ret
+Eighth ENDP
+
+; ---- sparkline of the newest wd samples of a ring buffer ----
+Spark PROC USES ebx esi edi px:DWORD, py:DWORD, wd:DWORD, pRing:DWORD, rmask:DWORD, head:DWORD, cnt:DWORD, c1:DWORD, c2:DWORD
+    LOCAL n:DWORD, mx:DWORD, last:DWORD
+    mov  eax, cnt
+    cmp  eax, wd
+    jbe  sk_n
+    mov  eax, wd
+sk_n:
+    mov  n, eax
+    test eax, eax
+    jz   sk_done
+    dec  eax
+    jnz  sk_last
+    inc  eax
+sk_last:
+    mov  last, eax                  ; max(n-1, 1) for the colour fade
+    mov  mx, 1
+    mov  ebx, pRing
+    xor  esi, esi
+sk_max:
+    cmp  esi, n
+    jae  sk_draw
+    mov  eax, head
+    sub  eax, n
+    add  eax, esi
+    and  eax, rmask
+    mov  eax, [ebx+eax*4]
+    cmp  eax, mx
+    jbe  sk_mnext
+    mov  mx, eax
+sk_mnext:
+    inc  esi
+    jmp  sk_max
+sk_draw:
+    xor  esi, esi
+sk_loop:
+    cmp  esi, n
+    jae  sk_done
+    mov  eax, head
+    sub  eax, n
+    add  eax, esi
+    and  eax, rmask
+    mov  eax, [ebx+eax*4]
+    mov  edx, 7                     ; level 0-7
+    mul  edx
+    div  mx
+    lea  edi, [eax+2581h]
+    invoke Lerp, c2, c1, esi, last
+    mov  ecx, px
+    add  ecx, wd
+    sub  ecx, n
+    add  ecx, esi
+    invoke Cell, ecx, py, edi, eax, C_KEEP
+    inc  esi
+    jmp  sk_loop
+sk_done:
+    ret
+Spark ENDP
+
+; =============================================================
+;  Output: true colour through VT sequences, or the 16-colour
+;  console as a fallback
+; =============================================================
+
+; ---- characters the classic console font does not have ----
+FineGlyph PROC chv:DWORD
+    mov  eax, chv
+    cmp  fineGlyphs, 0
+    jne  fg_done
+    cmp  eax, 25C6h                 ; diamond -> square
+    jne  fg_low
+    mov  eax, 25A0h
+    ret
+fg_low:
+    cmp  eax, 2581h                 ; lower 1/8 .. 7/8 blocks
+    jb   fg_done
+    cmp  eax, 2587h
+    ja   fg_left
+    cmp  eax, 2582h
+    ja   fg_half
+    mov  eax, '_'
+    ret
+fg_half:
+    cmp  eax, 2585h
+    ja   fg_full
+    mov  eax, 2584h
+    ret
+fg_left:
+    cmp  eax, 2589h                 ; left 7/8 .. 1/8 blocks
+    jb   fg_done
+    cmp  eax, 258Fh
+    ja   fg_done
+    cmp  eax, 258Ch
+    je   fg_done
+    jb   fg_full
+    mov  eax, 258Ch
+    ret
+fg_full:
+    mov  eax, 2588h
+fg_done:
+    ret
+FineGlyph ENDP
+
+; ---- append to the VT output buffer ----
+EmitW PROC chv:DWORD
+    mov  edx, vtLen
+    mov  eax, chv
+    mov  vtBuf[edx*2], ax
+    inc  vtLen
+    ret
+EmitW ENDP
+
+EmitA PROC USES esi pStr:DWORD
+    mov  esi, pStr
+ea_loop:
+    movzx eax, BYTE PTR [esi]
+    test eax, eax
+    jz   ea_done
+    invoke EmitW, eax
+    inc  esi
+    jmp  ea_loop
+ea_done:
+    ret
+EmitA ENDP
+
+EmitNum PROC val:DWORD
+    invoke NumToStr, val
+    invoke EmitA, eax
+    ret
+EmitNum ENDP
+
+; ---- "r;g;b" of a colour ----
+EmitRGB PROC USES ebx clr:DWORD
+    mov  ebx, clr
+    movzx eax, bl
+    invoke EmitNum, eax
+    invoke EmitW, ';'
+    movzx eax, bh
+    invoke EmitNum, eax
+    invoke EmitW, ';'
+    shr  ebx, 16
+    movzx eax, bl
+    invoke EmitNum, eax
+    ret
+EmitRGB ENDP
+
+; ---- ESC[38;2;r;g;b;48;2;r;g;bm : set foreground and background ----
+EmitSgr PROC fg:DWORD, bg:DWORD
+    invoke EmitA, ADDR vtCsi
+    invoke EmitA, ADDR vtFg
+    invoke EmitRGB, fg
+    invoke EmitA, ADDR vtBg
+    invoke EmitRGB, bg
+    invoke EmitW, 'm'
+    ret
+EmitSgr ENDP
+
+; ---- whole frame as one WriteConsoleW call ----
+FlushVT PROC USES ebx esi edi
+    LOCAL row:DWORD, lastFg:DWORD, lastBg:DWORD
+    mov  vtLen, 0
+    invoke EmitA, ADDR vtFrame
+    mov  row, 0
+fv_row:
+    cmp  row, SCR_H
+    jae  fv_end
+    invoke EmitA, ADDR vtCsi        ; move to the start of the row
+    mov  eax, row
+    inc  eax
+    invoke EmitNum, eax
+    invoke EmitW, ';'
+    mov  eax, offX
+    inc  eax
+    invoke EmitNum, eax
+    invoke EmitW, 'H'
+    mov  lastFg, -2
+    mov  lastBg, -2
+    imul esi, row, SCR_W * 12
+    add  esi, OFFSET canvas
+    xor  ebx, ebx
+fv_col:
+    cmp  ebx, SCR_W
+    jae  fv_next
+    mov  eax, [esi+4]
+    mov  edx, [esi+8]
+    cmp  eax, lastFg                ; colours only when they change
+    jne  fv_sgr
+    cmp  edx, lastBg
+    je   fv_ch
+fv_sgr:
+    mov  lastFg, eax
+    mov  lastBg, edx
+    invoke EmitSgr, eax, edx
+fv_ch:
+    invoke FineGlyph, DWORD PTR [esi]
+    invoke EmitW, eax
+    add  esi, 12
+    inc  ebx
+    jmp  fv_col
+fv_next:
+    inc  row
+    jmp  fv_row
+fv_end:
+    invoke EmitA, ADDR vtFrameEnd
+    invoke WriteConsoleW, hOut, ADDR vtBuf, vtLen, ADDR nWritten, 0
+    ret
+FlushVT ENDP
+
+; ---- nearest of the 16 console colours (fallback output) ----
+Nearest PROC USES ebx esi edi clr:DWORD
+    LOCAL best:DWORD, bestD:DWORD
+    mov  bestD, 7FFFFFFFh
+    mov  best, 0
+    xor  esi, esi
+nr_loop:
+    cmp  esi, 16
+    jae  nr_done
+    xor  edi, edi                   ; squared distance
+    xor  ecx, ecx
+nr_ch:
+    mov  eax, clr
+    shr  eax, cl
+    and  eax, 0FFh
+    mov  ebx, palette[esi*4]
+    shr  ebx, cl
+    and  ebx, 0FFh
+    sub  eax, ebx
+    imul eax, eax
+    add  edi, eax
+    add  ecx, 8
+    cmp  ecx, 24
+    jb   nr_ch
+    cmp  edi, bestD
+    jae  nr_next
+    mov  bestD, edi
+    mov  best, esi
+nr_next:
+    inc  esi
+    jmp  nr_loop
+nr_done:
+    mov  eax, best
+    ret
+Nearest ENDP
+
+FlushLegacy PROC USES ebx esi edi
+    lea  esi, canvas
+    lea  edi, legacyBuf
+    xor  ebx, ebx
+fl_loop:
+    cmp  ebx, SCR_W * SCR_H
+    jae  fl_write
+    invoke Nearest, DWORD PTR [esi+8]
+    shl  eax, 4
+    push eax
+    invoke Nearest, DWORD PTR [esi+4]
+    pop  edx
+    or   eax, edx
+    shl  eax, 16                    ; attribute in the high word
+    push eax
+    invoke FineGlyph, DWORD PTR [esi]
+    pop  edx
+    and  eax, 0FFFFh
+    or   eax, edx
+    mov  [edi], eax
+    add  esi, 12
+    add  edi, 4
+    inc  ebx
+    jmp  fl_loop
+fl_write:
     mov  eax, offX
     mov  writeRegion, ax
     mov  writeRegion+2, 0
     add  eax, SCR_W - 1
     mov  writeRegion+4, ax
     mov  writeRegion+6, SCR_H - 1
-    invoke WriteConsoleOutputA, hOut, ADDR canvas, (SCR_H SHL 16) OR SCR_W, 0, ADDR writeRegion
+    invoke WriteConsoleOutputW, hOut, ADDR legacyBuf, (SCR_H SHL 16) OR SCR_W, 0, ADDR writeRegion
+    ret
+FlushLegacy ENDP
+
+Flush PROC
+    cmp  vtOK, 0
+    je   fl_legacy
+    invoke FlushVT
+    ret
+fl_legacy:
+    invoke FlushLegacy
     ret
 Flush ENDP
 
@@ -625,6 +1083,41 @@ cl_other:
     ret
 Classify ENDP
 
+; ---- n-gram tracker: count letter pairs and triples inside words ----
+TrackNgram PROC cat:DWORD, kc:DWORD
+    mov  eax, cat
+    cmp  eax, CAT_VOWEL
+    je   tn_letter
+    cmp  eax, CAT_CONS
+    je   tn_letter
+    mov  prevL1, -1                 ; anything else ends the word
+    mov  prevL2, -1
+    ret
+tn_letter:
+    mov  eax, kc
+    or   eax, 20h
+    sub  eax, 'a'                   ; eax = letter 0-25
+    mov  ecx, prevL1
+    cmp  ecx, -1
+    je   tn_shift
+    imul edx, ecx, 26               ; bigram index = prev*26 + cur
+    add  edx, eax
+    inc  bigrams[edx*4]
+    mov  edx, prevL2
+    cmp  edx, -1
+    je   tn_shift
+    imul edx, edx, 26               ; trigram index = (prev2*26 + prev)*26 + cur
+    add  edx, ecx
+    imul edx, edx, 26
+    add  edx, eax
+    inc  trigrams[edx*4]
+tn_shift:
+    mov  edx, prevL1
+    mov  prevL2, edx
+    mov  prevL1, eax
+    ret
+TrackNgram ENDP
+
 ; ---- count one typed character (kc = ASCII, vk = virtual key) ----
 CountChar PROC USES ebx kc:DWORD, vk:DWORD
     mov  ebx, kc
@@ -674,7 +1167,9 @@ cc_sym:
 cc_other:
     inc  others
 
-cc_glyph:                           ; word counter: a run of letters/digits is one word
+cc_glyph:
+    invoke TrackNgram, curCat, ebx  ; bigrams / trigrams
+                                    ; word counter: a run of letters/digits is one word
     mov  eax, curCat
     cmp  eax, CAT_VOWEL
     je   cc_inword
@@ -756,41 +1251,62 @@ pc_zero:
 Percent ENDP
 
 ; ---- pick the 5 most frequent keys from freq[] ----
-ComputeTop5 PROC USES ebx esi edi
+; ---- pick the 5 largest entries of a DWORD table; returns eax = how many ----
+TopFive PROC USES ebx esi edi pTab:DWORD, nEnt:DWORD, pIdx:DWORD, pCnt:DWORD
+    LOCAL best:DWORD, bestCnt:DWORD
     xor  ebx, ebx                   ; ebx = rank being filled
-t5_rank:
+tf_rank:
     cmp  ebx, 5
-    jae  t5_done
-    mov  edi, -1                    ; best key so far
-    xor  edx, edx                   ; best count so far
+    jae  tf_done
+    mov  best, -1
+    mov  bestCnt, 0
     xor  esi, esi
-t5_scan:
-    mov  eax, freq[esi*4]
-    cmp  eax, edx
-    jbe  t5_next
-    xor  ecx, ecx                   ; already picked?
-t5_check:
+tf_scan:
+    cmp  esi, nEnt
+    jae  tf_pick
+    mov  edx, pTab
+    mov  eax, [edx+esi*4]
+    cmp  eax, bestCnt
+    jbe  tf_next
+    mov  edi, pIdx                  ; already picked?
+    xor  ecx, ecx
+tf_check:
     cmp  ecx, ebx
-    jae  t5_take
-    cmp  top5Key[ecx*4], esi
-    je   t5_next
+    jae  tf_take
+    cmp  [edi+ecx*4], esi
+    je   tf_next
     inc  ecx
-    jmp  t5_check
-t5_take:
-    mov  edi, esi
-    mov  edx, eax
-t5_next:
+    jmp  tf_check
+tf_take:
+    mov  best, esi
+    mov  bestCnt, eax
+tf_next:
     inc  esi
-    cmp  esi, 256
-    jb   t5_scan
-    cmp  edi, -1
-    je   t5_done
-    mov  top5Key[ebx*4], edi
-    mov  top5Cnt[ebx*4], edx
+    jmp  tf_scan
+tf_pick:
+    cmp  best, -1
+    je   tf_done
+    mov  edi, pIdx
+    mov  eax, best
+    mov  [edi+ebx*4], eax
+    mov  edi, pCnt
+    mov  eax, bestCnt
+    mov  [edi+ebx*4], eax
     inc  ebx
-    jmp  t5_rank
-t5_done:
-    mov  top5N, ebx
+    jmp  tf_rank
+tf_done:
+    mov  eax, ebx
+    ret
+TopFive ENDP
+
+; ---- top 5 keys, bigrams and trigrams ----
+ComputeTop5 PROC
+    invoke TopFive, ADDR freq, 256, ADDR top5Key, ADDR top5Cnt
+    mov  top5N, eax
+    invoke TopFive, ADDR bigrams, NG2, ADDR bi5Idx, ADDR bi5Cnt
+    mov  bi5N, eax
+    invoke TopFive, ADDR trigrams, NG3, ADDR tri5Idx, ADDR tri5Cnt
+    mov  tri5N, eax
     ret
 ComputeTop5 ENDP
 
@@ -852,8 +1368,22 @@ us_top:                             ; one WPM sample per second for the history 
     and  ecx, HIST_SIZE - 1
     mov  histHead, ecx
     cmp  histCount, HIST_N
-    jae  us_top5
+    jae  us_cards
     inc  histCount
+us_cards:                           ; samples for the card sparklines
+    mov  ecx, cardHead
+    mov  eax, vowels
+    mov  cardV[ecx*4], eax
+    mov  eax, consonants
+    mov  cardC[ecx*4], eax
+    mov  eax, totalKeys
+    mov  cardT[ecx*4], eax
+    inc  ecx
+    and  ecx, CARD_MASK
+    mov  cardHead, ecx
+    cmp  cardCount, CARD_SIZE
+    jae  us_top5
+    inc  cardCount
 us_top5:
     invoke ComputeTop5
     ret
@@ -902,116 +1432,174 @@ kn_ext:
     ret
 KeyName ENDP
 
+; ---- n-gram index -> lowercase letters (nlen = 2 or 3) ----
+NgramName PROC idx:DWORD, nlen:DWORD
+    mov  eax, idx
+    mov  ecx, nlen
+    mov  ngBuf[ecx], 0
+ng_loop:
+    dec  ecx
+    xor  edx, edx
+    push ecx
+    mov  ecx, 26
+    div  ecx
+    pop  ecx
+    add  dl, 'a'
+    mov  ngBuf[ecx], dl
+    test ecx, ecx
+    jnz  ng_loop
+    mov  eax, OFFSET ngBuf
+    ret
+NgramName ENDP
+
 ; =============================================================
 ;  Dashboard sections
 ; =============================================================
 
-; ---- title bar: name, subtitle, LIVE/PAUSED badge and session timer ----
-DrawHeader PROC
-    invoke FillRect, 0, 0, SCR_W, 1, ' ', A_HDR
-    invoke PutCh, 2, 0, 0FEh, A_HDR_ACC
-    invoke PutStr, 4, 0, ADDR sTitle, A_HDR_HI
-    invoke PutStr, 23, 0, ADDR sSubtitle, A_HDR
+; ---- title bar: gradient, name, LIVE/PAUSED badge and session timer ----
+DrawHeader PROC USES ebx
+    xor  ebx, ebx
+dh_grad:
+    invoke Lerp, C_HDR1, C_HDR2, ebx, SCR_W - 1
+    invoke Cell, ebx, 0, ' ', C_WHITE, eax
+    inc  ebx
+    cmp  ebx, SCR_W
+    jb   dh_grad
+    invoke Cell, 2, 0, 25C6h, C_CYAN, C_KEEP
+    invoke Text, 4, 0, ADDR sTitle, C_WHITE, C_KEEP
+    invoke Text, 23, 0, ADDR sSubtitle, C_HDRTXT, C_KEEP
     cmp  paused, 0
     je   dh_live
-    invoke PutCh, 74, 0, 0FEh, A_HDR_WARN
-    invoke PutStr, 76, 0, ADDR sPaused, A_HDR_WARN
+    invoke Cell, 74, 0, 25CFh, C_GOLD, C_KEEP
+    invoke Text, 76, 0, ADDR sPaused, C_GOLD, C_KEEP
     jmp  dh_time
 dh_live:
-    mov  eax, A_HDR_OK              ; blinking dot
+    mov  eax, C_OK                  ; blinking dot
     test nowTick, 512
     jz   dh_dot
-    mov  eax, A_HDR
+    mov  eax, C_HDRTXT
 dh_dot:
-    invoke PutCh, 74, 0, 0FEh, eax
-    invoke PutStr, 76, 0, ADDR sLive, A_HDR_OK
+    invoke Cell, 74, 0, 25CFh, eax, C_KEEP
+    invoke Text, 76, 0, ADDR sLive, C_OK, C_KEEP
 dh_time:
-    invoke PutStr, 86, 0, ADDR sTime, A_HDR
-    invoke PutTime, 91, 0, elapsedSec, A_HDR_HI
+    invoke Text, 86, 0, ADDR sTime, C_HDRTXT, C_KEEP
+    invoke TimeMS, 91, 0, elapsedSec, C_WHITE
     ret
 DrawHeader ENDP
 
-; ---- the four big stat cards: vowels, consonants, total keys, WPM ----
+; ---- one stat card: rounded box, gradient number, sparkline ----
+Card PROC USES ebx esi px:DWORD, pTitle:DWORD, val:DWORD, c1:DWORD, c2:DWORD, pRing:DWORD, rmask:DWORD, head:DWORD, cnt:DWORD
+    invoke Lerp, c2, C_BORDER, 35, 100
+    invoke RBox, px, 2, 23, 6, pTitle, eax, c1
+    mov  eax, px
+    add  eax, 2
+    invoke BigNum, eax, 3, val, c1, c2
+    invoke NumToStr, val            ; sparkline fills the space after the digits
+    lea  ebx, [ecx*4]
+    mov  esi, 17
+    sub  esi, ebx                   ; width = 17 - 4 * digits
+    jle  cd_done
+    mov  eax, px
+    add  eax, ebx
+    add  eax, 3
+    invoke Spark, eax, 5, esi, pRing, rmask, head, cnt, c1, c2
+cd_done:
+    ret
+Card ENDP
+
 DrawCards PROC USES ebx
     mov  ebx, vowels
     add  ebx, consonants            ; ebx = letters typed
 
-    invoke DrawBox, 2, 2, 23, 6, ADDR sCardV, A_VOWEL, A_PANEL_HI
-    invoke BigNum, 4, 3, vowels, A_VOWEL
+    invoke Card, 2, ADDR sCardV, vowels, C_GREEN, C_GREEN2, ADDR cardV, CARD_MASK, cardHead, cardCount
     invoke Percent, vowels, ebx
-    invoke PutNum, 4, 6, eax, A_VOWEL
-    invoke PutStr, eax, 6, ADDR sPctLetters, A_BORDER
+    invoke Num, 4, 6, eax, C_GREEN
+    invoke Text, eax, 6, ADDR sPctLetters, C_MUTED, C_KEEP
 
-    invoke DrawBox, 26, 2, 23, 6, ADDR sCardC, A_CONS, A_PANEL_HI
-    invoke BigNum, 28, 3, consonants, A_CONS
+    invoke Card, 26, ADDR sCardC, consonants, C_AMBER, C_AMBER2, ADDR cardC, CARD_MASK, cardHead, cardCount
     invoke Percent, consonants, ebx
-    invoke PutNum, 28, 6, eax, A_CONS
-    invoke PutStr, eax, 6, ADDR sPctLetters, A_BORDER
+    invoke Num, 28, 6, eax, C_AMBER
+    invoke Text, eax, 6, ADDR sPctLetters, C_MUTED, C_KEEP
 
-    invoke DrawBox, 50, 2, 23, 6, ADDR sCardT, A_CYAN, A_PANEL_HI
-    invoke BigNum, 52, 3, totalKeys, A_CYAN
-    invoke PutStr, 52, 6, ADDR sKeysSession, A_BORDER
+    invoke Card, 50, ADDR sCardT, totalKeys, C_CYAN, C_CYAN2, ADDR cardT, CARD_MASK, cardHead, cardCount
+    invoke Text, 52, 6, ADDR sKeysSession, C_MUTED, C_KEEP
 
-    invoke DrawBox, 74, 2, 23, 6, ADDR sCardW, A_PURPLE, A_PANEL_HI
-    invoke BigNum, 76, 3, wpmNow, A_PURPLE
-    invoke PutStr, 76, 6, ADDR sPeak, A_BORDER
-    invoke PutNum, eax, 6, wpmPeak, A_PANEL_HI
-    invoke PutStr, eax, 6, ADDR sAvg, A_BORDER
-    invoke PutNum, eax, 6, wpmAvg, A_PANEL_HI
+    invoke Card, 74, ADDR sCardW, wpmNow, C_PURP, C_PURP2, ADDR wpmHist, HIST_SIZE - 1, histHead, histCount
+    invoke Text, 76, 6, ADDR sPeak, C_MUTED, C_KEEP
+    invoke Num, eax, 6, wpmPeak, C_WHITE
+    invoke Text, eax, 6, ADDR sAvg, C_MUTED, C_KEEP
+    invoke Num, eax, 6, wpmAvg, C_WHITE
     ret
 DrawCards ENDP
 
 ; ---- small "pill" counter on row 8; returns eax = next x ----
-Chip PROC USES ebx px:DWORD, pLabel:DWORD, val:DWORD, attr:DWORD
-    invoke PutCh, px, 8, ' ', A_PANEL
+Chip PROC USES ebx px:DWORD, pLabel:DWORD, val:DWORD, fg:DWORD
+    invoke Cell, px, 8, ' ', C_TEXT, C_PANEL
     mov  eax, px
     inc  eax
-    invoke PutStr, eax, 8, pLabel, A_BORDER
-    invoke PutNum, eax, 8, val, attr
+    invoke Text, eax, 8, pLabel, C_MUTED, C_PANEL
     mov  ebx, eax
-    invoke PutCh, ebx, 8, ' ', A_PANEL
+    invoke NumToStr, val
+    invoke Text, ebx, 8, eax, fg, C_PANEL
+    mov  ebx, eax
+    invoke Cell, ebx, 8, ' ', C_TEXT, C_PANEL
     lea  eax, [ebx+2]
     ret
 Chip ENDP
 
-; ---- row of small counters: digits, spaces, symbols, other keys ----
-DrawChips PROC USES ebx esi
-    invoke Chip, 2, ADDR sDigits, digits, A_CYAN
-    invoke Chip, eax, ADDR sSpaces, spaces, A_PANEL_HI
-    invoke Chip, eax, ADDR sSymbols, symbols, A_PURPLE
-    invoke Chip, eax, ADDR sOther, others, A_PANEL_HI
-    invoke Chip, eax, ADDR sWords, words, A_VOWEL
+; ---- counters (digits, spaces, symbols, other, words) and the mix bar ----
+DrawChips PROC USES ebx esi edi
+    invoke Chip, 2, ADDR sDigits, digits, C_CYAN
+    invoke Chip, eax, ADDR sSpaces, spaces, C_TEXT
+    invoke Chip, eax, ADDR sSymbols, symbols, C_PURP
+    invoke Chip, eax, ADDR sOther, others, C_TEXT
+    invoke Chip, eax, ADDR sWords, words, C_GREEN
 
-    ; vowel / consonant mix bar (columns 62-94)
-    invoke PutCh, 60, 8, 'V', 02h
-    invoke PutCh, 96, 8, 'C', 06h
+    ; vowel / consonant mix bar (columns 62-95), green fading into amber
+    invoke Cell, 60, 8, 'V', C_GREEN, C_KEEP
+    invoke Cell, 97, 8, 'C', C_AMBER, C_KEEP
     mov  ecx, vowels
     add  ecx, consonants
     test ecx, ecx
     jnz  dc_bar
-    invoke FillRect, 62, 8, 33, 1, 0B0h, A_MUTED_PG
+    invoke Fill, 62, 8, 34, 1, ' ', C_TEXT, C_TRACK
     ret
 dc_bar:
     mov  eax, vowels
-    mov  edx, 33
+    mov  edx, 34
     mul  edx
     div  ecx
-    mov  ebx, eax                   ; vowel part length
-    invoke FillRect, 62, 8, ebx, 1, 0DBh, 02h
-    mov  esi, 33
-    sub  esi, ebx
-    lea  eax, [ebx+62]
-    invoke FillRect, eax, 8, esi, 1, 0DBh, 06h
+    mov  edi, eax                   ; edi = vowel part length
+    xor  esi, esi
+dc_cell:
+    cmp  esi, 34
+    jae  dc_done
+    cmp  esi, edi
+    jae  dc_cons
+    invoke Lerp, C_GREEN2, C_GREEN, esi, 33
+    jmp  dc_put
+dc_cons:
+    mov  ecx, esi
+    sub  ecx, edi
+    mov  edx, 33
+    sub  edx, edi
+    invoke Lerp, C_AMBER, C_AMBER2, ecx, edx
+dc_put:
+    lea  ecx, [esi+62]
+    invoke Cell, ecx, 8, 2588h, eax, C_PAGE
+    inc  esi
+    jmp  dc_cell
+dc_done:
     ret
 DrawChips ENDP
 
-; ---- "last N characters" panel; the newest key is highlighted ----
+; ---- "last N characters" panel: older keys fade out, newest highlighted ----
 DrawLastN PROC USES ebx esi edi
     LOCAL show:DWORD, firstIdx:DWORD
-    invoke DrawBox, 2, 9, 96, 3, ADDR sBoxLast, A_BORDER, A_PANEL_HI
-    invoke PutStr, 24, 9, ADDR sNEq, A_PANEL_HI
-    invoke PutNum, eax, 9, nView, A_CYAN
-    invoke PutStr, eax, 9, ADDR sNHint, A_BORDER
+    invoke RBox, 2, 9, 96, 3, ADDR sBoxLast, C_BORDER, C_TEXT
+    invoke Text, 24, 9, ADDR sNEq, C_TEXT, C_KEEP
+    invoke Num, eax, 9, nView, C_CYAN
+    invoke Text, eax, 9, ADDR sNHint, C_MUTED, C_KEEP
 
     mov  eax, lastCount             ; show = min(lastCount, N)
     cmp  eax, nView
@@ -1031,32 +1619,30 @@ ln_loop:
     mov  eax, firstIdx
     add  eax, esi
     and  eax, NMAX - 1
-    movzx edi, lastRing[eax]
-    mov  eax, show                  ; age 0 = newest
-    dec  eax
-    sub  eax, esi
-    mov  ecx, A_NEWEST
-    test eax, eax
-    jz   ln_put
-    mov  ecx, A_PANEL_HI
-    cmp  eax, 8
-    jb   ln_put
-    mov  ecx, A_PANEL
-    mov  edx, nView
-    shr  edx, 1
-    cmp  eax, edx
-    jb   ln_put
-    mov  ecx, A_BORDER
-ln_put:
-    lea  eax, [esi+4]
-    invoke PutCh, eax, 10, edi, ecx
+    movzx eax, lastRing[eax]
+    invoke GlyphW, eax
+    mov  edi, eax
+    mov  ebx, show                  ; age 0 = newest
+    dec  ebx
+    sub  ebx, esi
+    lea  ecx, [esi+4]
+    test ebx, ebx
+    jnz  ln_old
+    invoke Cell, ecx, 10, edi, C_PAGE, C_CYAN
+    jmp  ln_next
+ln_old:
+    push ecx
+    invoke Lerp, C_WHITE, C_DIM, ebx, 24
+    pop  ecx
+    invoke Cell, ecx, 10, edi, eax, C_KEEP
+ln_next:
     inc  esi
     jmp  ln_loop
 ln_empty:                           ; free slots shown as dots
     cmp  esi, nView
     jae  ln_cursor
     lea  eax, [esi+4]
-    invoke PutCh, eax, 10, 0FAh, A_BORDER
+    invoke Cell, eax, 10, 00B7h, C_DIM, C_KEEP
     inc  esi
     jmp  ln_empty
 ln_cursor:
@@ -1066,31 +1652,31 @@ ln_cursor:
     test nowTick, 512
     jnz  ln_key
     add  eax, 4
-    invoke PutCh, eax, 10, 0DDh, A_CYAN
+    invoke Cell, eax, 10, 258Fh, C_CYAN, C_KEEP
 
 ln_key:
-    invoke PutStr, 70, 10, ADDR sLastKey, A_BORDER
+    invoke Text, 70, 10, ADDR sLastKey, C_MUTED, C_KEEP
     cmp  lastKeyCode, -1
     jne  ln_has
-    invoke PutStr, eax, 10, ADDR sDash, A_BORDER
+    invoke Text, eax, 10, ADDR sDash, C_MUTED, C_KEEP
     ret
 ln_has:
     mov  ebx, eax
     invoke KeyName, lastKeyCode
-    invoke PutStr, ebx, 10, eax, A_PANEL_HI
-    invoke PutStr, eax, 10, ADDR sAscii, A_BORDER
-    invoke PutNum, eax, 10, lastKeyCode, A_CYAN
+    invoke Text, ebx, 10, eax, C_WHITE, C_KEEP
+    invoke Text, eax, 10, ADDR sAscii, C_MUTED, C_KEEP
+    invoke Num, eax, 10, lastKeyCode, C_CYAN
     ret
 DrawLastN ENDP
 
-; ---- A-Z letter histogram with half-block bars and a vowel/consonant mix bar ----
+; ---- A-Z letter histogram: 5 rows of 1/8-step bars with a vertical gradient ----
 DrawHistogram PROC USES ebx esi edi
-    LOCAL maxL:DWORD, realMax:DWORD, cnt:DWORD, hh:DWORD, col:DWORD, attr:DWORD, lattr:DWORD
-    invoke DrawBox, 2, 12, 56, 14, ADDR sBoxHist, A_BORDER, A_PANEL_HI
-    invoke PutCh, 4, 13, 0FEh, A_VOWEL
-    invoke PutStr, 6, 13, ADDR sVowel, A_PANEL
-    invoke PutCh, 13, 13, 0FEh, A_CONS
-    invoke PutStr, 15, 13, ADDR sConsonant, A_PANEL
+    LOCAL maxL:DWORD, realMax:DWORD, cnt:DWORD, h8:DWORD, col:DWORD, lo:DWORD, hi:DWORD
+    invoke RBox, 2, 12, 56, 10, ADDR sBoxHist, C_BORDER, C_TEXT
+    invoke Cell, 4, 13, 25CFh, C_GREEN, C_KEEP
+    invoke Text, 6, 13, ADDR sVowel, C_MUTED, C_KEEP
+    invoke Cell, 13, 13, 25CFh, C_AMBER, C_KEEP
+    invoke Text, 15, 13, ADDR sConsonant, C_MUTED, C_KEEP
 
     mov  realMax, 0                 ; tallest bar (upper + lower case)
     xor  esi, esi
@@ -1110,10 +1696,10 @@ hg_mnext:
     inc  eax
 hg_m1:
     mov  maxL, eax
-    invoke PutStr, 47, 13, ADDR sMax, A_BORDER
-    invoke PutNum, eax, 13, realMax, A_PANEL_HI
+    invoke Text, 47, 13, ADDR sMax, C_MUTED, C_KEEP
+    invoke Num, eax, 13, realMax, C_WHITE
 
-    invoke FillRect, 4, 23, 52, 1, 0C4h, A_BORDER
+    invoke Fill, 4, 19, 52, 1, 2500h, C_AXIS, C_KEEP
 
     xor  esi, esi                   ; esi = letter 0-25
 hg_col:
@@ -1128,51 +1714,56 @@ hg_col:
     mov  eax, esi
     add  eax, 'a'
     invoke Classify, eax
-    mov  attr, A_CONS
+    mov  lo, C_AMBER2
+    mov  hi, C_AMBER
     cmp  eax, CAT_VOWEL
     jne  hg_lbl
-    mov  attr, A_VOWEL
+    mov  lo, C_GREEN2
+    mov  hi, C_GREEN
 hg_lbl:
-    mov  lattr, A_PANEL_HI
-    cmp  cnt, 0
-    jne  hg_l1
-    mov  lattr, A_BORDER
-hg_l1:
+    lea  edi, [esi+'A']
     cmp  esi, lastLetter
+    jne  hg_l1
+    invoke Cell, col, 20, edi, C_PAGE, C_CYAN
+    jmp  hg_bars
+hg_l1:
+    mov  eax, C_TEXT
+    cmp  cnt, 0
     jne  hg_l2
-    mov  lattr, A_NEWEST
+    mov  eax, C_DIM
 hg_l2:
-    mov  eax, esi
-    add  eax, 'A'
-    invoke PutCh, col, 24, eax, lattr
+    invoke Cell, col, 20, edi, eax, C_KEEP
 
+hg_bars:
     cmp  cnt, 0
     je   hg_next
-    mov  eax, cnt                   ; bar height in half rows (1-18)
-    mov  edx, 18
+    mov  eax, cnt                   ; height in eighths (1-40), rounded up
+    mov  edx, 40
     mul  edx
     add  eax, maxL
     dec  eax
     div  maxL
-    mov  hh, eax
-
+    mov  h8, eax
     xor  edi, edi                   ; edi = row from the bottom
 hg_bar:
-    cmp  edi, 9
+    cmp  edi, 5
     jae  hg_next
     mov  eax, edi
-    shl  eax, 1
-    mov  edx, hh
-    sub  edx, eax
+    shl  eax, 3
+    mov  ebx, h8
+    sub  ebx, eax                   ; eighths left for this row
     jle  hg_next
-    mov  ecx, 0DBh                  ; full block
-    cmp  edx, 1
-    jne  hg_draw
-    mov  ecx, 0DCh                  ; half block on top
-hg_draw:
-    mov  eax, 22
-    sub  eax, edi
-    invoke PutCh, col, eax, ecx, attr
+    cmp  ebx, 8
+    jbe  hg_e
+    mov  ebx, 8
+hg_e:
+    invoke Lerp, lo, hi, edi, 4
+    push eax
+    invoke Eighth, ebx
+    pop  edx
+    mov  ecx, 18
+    sub  ecx, edi
+    invoke Cell, col, ecx, eax, edx, C_KEEP
     inc  edi
     jmp  hg_bar
 hg_next:
@@ -1182,30 +1773,56 @@ hg_next:
     ret
 DrawHistogram ENDP
 
-; ---- colour for a key in the heatmap, from cold to hot ----
-HeatAttr PROC cnt:DWORD
+; ---- key colour on the cold -> hot ramp (cnt 0 = unused key) ----
+HeatColor PROC cnt:DWORD
+    cmp  cnt, 0
+    jne  hc_ramp
+    mov  eax, C_OFFKEY
+    ret
+hc_ramp:
+    invoke Ramp, ADDR heatStops, 6, cnt, heatMax
+    ret
+HeatColor ENDP
+
+; ---- label colour that stays readable on a key of that heat ----
+HeatText PROC cnt:DWORD
     mov  eax, cnt
     test eax, eax
-    jz   ha_pick
-    mov  edx, 5                     ; level = ceil(cnt * 5 / max)
-    mul  edx
-    add  eax, heatMax
-    adc  edx, 0
-    sub  eax, 1
-    sbb  edx, 0
-    div  heatMax
-    cmp  eax, 5
-    jbe  ha_pick
-    mov  eax, 5
-ha_pick:
-    movzx eax, heatAttrs[eax]
+    jnz  ht_on
+    mov  eax, C_MUTED
     ret
-HeatAttr ENDP
+ht_on:
+    imul eax, eax, 10               ; bright keys (> 30% of max) get dark text
+    mov  ecx, heatMax
+    imul ecx, ecx, 3
+    cmp  eax, ecx
+    jbe  ht_light
+    mov  eax, C_PAGE
+    ret
+ht_light:
+    mov  eax, C_WHITE
+    ret
+HeatText ENDP
+
+; ---- one key: half blocks on both sides give it a keycap shape ----
+Keycap PROC USES ebx px:DWORD, py:DWORD, lbl:DWORD, cnt:DWORD
+    invoke HeatColor, cnt
+    mov  ebx, eax
+    invoke Cell, px, py, 2590h, ebx, C_PANEL
+    invoke HeatText, cnt
+    mov  ecx, px
+    inc  ecx
+    invoke Cell, ecx, py, lbl, eax, ebx
+    mov  ecx, px
+    add  ecx, 2
+    invoke Cell, ecx, py, 258Ch, ebx, C_PANEL
+    ret
+Keycap ENDP
 
 ; ---- QWERTY keyboard coloured cold to hot by key usage ----
 DrawHeatmap PROC USES ebx esi edi
     LOCAL rowI:DWORD, kx:DWORD, ky:DWORD, pVk:DWORD
-    invoke DrawBox, 59, 12, 39, 7, ADDR sBoxHeat, A_BORDER, A_PANEL_HI
+    invoke RBox, 59, 12, 39, 7, ADDR sBoxHeat, C_BORDER, C_TEXT
 
     mov  heatMax, 1
     xor  ecx, ecx
@@ -1237,12 +1854,7 @@ hm_key:
     jz   hm_nextrow
     mov  edx, pVk
     movzx eax, BYTE PTR [edx]
-    invoke HeatAttr, vkFreq[eax*4]
-    mov  ebx, eax
-    invoke PutCh, kx, ky, edi, ebx
-    mov  eax, kx
-    inc  eax
-    invoke PutCh, eax, ky, ' ', ebx
+    invoke Keycap, kx, ky, edi, vkFreq[eax*4]
     add  kx, 3
     inc  esi
     inc  pVk
@@ -1252,175 +1864,243 @@ hm_nextrow:
     cmp  rowI, 4
     jb   hm_row
 
-    invoke HeatAttr, vkFreq[20h*4]  ; space bar
+    invoke HeatColor, vkFreq[20h*4] ; space bar
     mov  ebx, eax
-    invoke FillRect, 66, 17, 20, 1, ' ', ebx
-    invoke PutStr, 73, 17, ADDR sSpace, ebx
+    invoke HeatText, vkFreq[20h*4]
+    mov  esi, eax
+    invoke Cell, 65, 17, 2590h, ebx, C_PANEL
+    invoke Fill, 66, 17, 18, 1, ' ', esi, ebx
+    invoke Text, 72, 17, ADDR sSpace, esi, C_KEEP
+    invoke Cell, 84, 17, 258Ch, ebx, C_PANEL
 
-    invoke PutStr, 68, 18, ADDR sCold, A_BORDER   ; legend in the bottom edge
-    mov  esi, 1
-    mov  edi, 74
+    invoke Text, 69, 18, ADDR sCold, C_MUTED, C_KEEP   ; legend in the bottom edge
+    xor  esi, esi
 hm_leg:
-    movzx ebx, heatAttrs[esi]
-    invoke PutCh, edi, 18, ' ', ebx
-    inc  edi
-    invoke PutCh, edi, 18, ' ', ebx
-    inc  edi
+    invoke Ramp, ADDR heatStops, 6, esi, 11
+    lea  ecx, [esi+75]
+    invoke Cell, ecx, 18, 2588h, eax, C_KEEP
     inc  esi
-    cmp  esi, 6
+    cmp  esi, 12
     jb   hm_leg
-    invoke PutStr, edi, 18, ADDR sHot, A_BORDER
+    invoke Text, 87, 18, ADDR sHot, C_MUTED, C_KEEP
     ret
 DrawHeatmap ENDP
 
-; ---- ranked table of the five most used keys ----
-DrawTop5 PROC USES ebx esi edi
-    LOCAL ky:DWORD, barLen:DWORD, attr:DWORD
-    invoke DrawBox, 59, 19, 39, 7, ADDR sBoxTop, A_BORDER, A_PANEL_HI
+; ---- top 5 table: keys, bigrams and trigrams side by side ----
+DrawRanks PROC USES ebx esi edi
+    LOCAL ky:DWORD
+    invoke RBox, 59, 19, 39, 8, ADDR sBoxRank, C_BORDER, C_TEXT
+    invoke Text, 61, 20, ADDR sHdrKey, C_MUTED, C_KEEP
+    invoke Text, 74, 20, ADDR sHdrBi, C_MUTED, C_KEEP
+    invoke Text, 86, 20, ADDR sHdrTri, C_MUTED, C_KEEP
+    invoke Cell, 72, 19, 252Ch, C_BORDER, C_KEEP   ; column separators
+    invoke Cell, 84, 19, 252Ch, C_BORDER, C_KEEP
+    invoke Cell, 72, 26, 2534h, C_BORDER, C_KEEP
+    invoke Cell, 84, 26, 2534h, C_BORDER, C_KEEP
+    mov  ebx, 20
+dr_sep:
+    cmp  ebx, 26
+    jae  dr_rows
+    invoke Cell, 72, ebx, 2502h, C_BORDER, C_KEEP
+    invoke Cell, 84, ebx, 2502h, C_BORDER, C_KEEP
+    inc  ebx
+    jmp  dr_sep
+dr_rows:
     xor  esi, esi
-tp_loop:
+dr_loop:
     cmp  esi, 5
-    jae  tp_done
-    lea  eax, [esi+20]
+    jae  dr_done
+    lea  eax, [esi+21]
     mov  ky, eax
-    movzx ecx, rankAttrs[esi]
     lea  eax, [esi+'1']
-    invoke PutCh, 61, ky, eax, ecx
-    cmp  esi, top5N
-    jae  tp_empty
+    invoke Cell, 60, ky, eax, rankColors[esi*4], C_KEEP
 
+    cmp  esi, top5N                 ; keys, coloured by category
+    jae  dr_k0
     mov  ebx, top5Key[esi*4]
-    invoke KeyName, ebx
-    invoke PutStr, 64, ky, eax, A_PANEL_HI
     invoke Classify, ebx
-    mov  attr, A_CYAN
+    mov  edi, C_CYAN
     cmp  eax, CAT_VOWEL
-    jne  tp_c1
-    mov  attr, A_VOWEL
-tp_c1:
+    jne  dr_c1
+    mov  edi, C_GREEN
+dr_c1:
     cmp  eax, CAT_CONS
-    jne  tp_c2
-    mov  attr, A_CONS
-tp_c2:
-    mov  eax, top5Cnt[esi*4]        ; bar length scaled to the #1 key
-    mov  edx, 18
-    mul  edx
-    div  top5Cnt
-    cmp  eax, 1
-    jae  tp_len
-    mov  eax, 1
-tp_len:
-    mov  barLen, eax
-    invoke FillRect, 69, ky, 18, 1, 0B0h, A_BORDER
-    invoke FillRect, 69, ky, barLen, 1, 0DBh, attr
-    invoke PutNumR, 91, ky, top5Cnt[esi*4], A_PANEL_HI
-    invoke Percent, top5Cnt[esi*4], totalKeys
-    invoke PutNumR, 95, ky, eax, A_BORDER
-    invoke PutCh, 96, ky, '%', A_BORDER
-    jmp  tp_next
-tp_empty:
-    invoke PutStr, 64, ky, ADDR sDash, A_BORDER
-tp_next:
+    jne  dr_c2
+    mov  edi, C_AMBER
+dr_c2:
+    invoke KeyName, ebx
+    invoke Text, 62, ky, eax, edi, C_KEEP
+    invoke NumR, 70, ky, top5Cnt[esi*4], C_WHITE
+    jmp  dr_bi
+dr_k0:
+    invoke Text, 62, ky, ADDR sDash, C_DIM, C_KEEP
+
+dr_bi:
+    cmp  esi, bi5N
+    jae  dr_b0
+    invoke NgramName, bi5Idx[esi*4], 2
+    invoke Text, 74, ky, eax, C_TEXT, C_KEEP
+    invoke NumR, 82, ky, bi5Cnt[esi*4], C_PURP
+    jmp  dr_tri
+dr_b0:
+    invoke Text, 74, ky, ADDR sDash, C_DIM, C_KEEP
+
+dr_tri:
+    cmp  esi, tri5N
+    jae  dr_t0
+    invoke NgramName, tri5Idx[esi*4], 3
+    invoke Text, 86, ky, eax, C_TEXT, C_KEEP
+    invoke NumR, 95, ky, tri5Cnt[esi*4], C_CYAN
+    jmp  dr_next
+dr_t0:
+    invoke Text, 86, ky, ADDR sDash, C_DIM, C_KEEP
+dr_next:
     inc  esi
-    jmp  tp_loop
-tp_done:
+    jmp  dr_loop
+dr_done:
     ret
-DrawTop5 ENDP
+DrawRanks ENDP
 
-; ---- bottom strips: session stats (row 26) and WPM history graph (row 29) ----
-DrawStrips PROC USES ebx esi
-    LOCAL mx:DWORD
-    invoke PutStr, 2, 26, ADDR sLongest, A_MUTED_PG
-    invoke PutNum, eax, 26, longestWord, 0Eh
-    invoke PutStr, eax, 26, ADDR sBackspaces, A_MUTED_PG
-    invoke PutNum, eax, 26, bsCount, 0Eh
-    invoke PutStr, eax, 26, ADDR sErrRate, A_MUTED_PG
-    mov  ebx, eax
-    invoke Percent, bsCount, totalKeys
-    invoke PutNum, ebx, 26, eax, 0Eh
-    invoke PutCh, eax, 26, '%', 0Eh
-    invoke PutStr, 78, 26, ADDR sAuto, A_MUTED_PG
-    cmp  autoSave, 0
-    je   st_off
-    invoke PutStr, eax, 26, ADDR sOn, 0Ah
-    jmp  st_hist
-st_off:
-    invoke PutStr, eax, 26, ADDR sOff, 08h
+; ---- WPM history: gradient area chart, one column per second ----
+DrawWpmHistory PROC USES ebx esi edi
+    LOCAL mx:DWORD, h8:DWORD, newest:DWORD
+    invoke RBox, 2, 22, 56, 5, ADDR sBoxWpm, C_BORDER, C_TEXT
 
-st_hist:
-    invoke PutStr, 2, 29, ADDR sHistory, A_MUTED_PG
     mov  mx, 20                     ; scale: at least 20 WPM
     xor  esi, esi
-st_max:
-    cmp  esi, HIST_N
-    jae  st_draw
-    mov  ecx, HIST_N
-    sub  ecx, histCount
-    cmp  esi, ecx
-    jb   st_mnext
+wh_max:
+    cmp  esi, histCount
+    jae  wh_scale
     mov  eax, histHead
-    add  eax, esi
-    add  eax, HIST_SIZE - HIST_N
+    sub  eax, esi
+    dec  eax
     and  eax, HIST_SIZE - 1
     mov  eax, wpmHist[eax*4]
     cmp  eax, mx
-    jbe  st_mnext
+    jbe  wh_mnext
     mov  mx, eax
-st_mnext:
+wh_mnext:
     inc  esi
-    jmp  st_max
-st_draw:
-    xor  esi, esi
-st_col:
+    jmp  wh_max
+wh_scale:
+    invoke Text, 45, 22, ADDR sMaxB, C_MUTED, C_KEEP
+    invoke Num, eax, 22, mx, C_WHITE
+    invoke Cell, eax, 22, ' ', C_TEXT, C_KEEP
+
+    xor  esi, esi                   ; esi = column 0 (oldest) .. HIST_N-1 (now)
+wh_col:
     cmp  esi, HIST_N
-    jae  st_tail
-    lea  ebx, [esi+26]              ; graph x position
+    jae  wh_done
+    lea  ebx, [esi+4]               ; x position
     mov  ecx, HIST_N
     sub  ecx, histCount
     cmp  esi, ecx
-    jb   st_next                    ; no sample yet
-    mov  eax, histHead
+    jae  wh_have
+wh_dot:
+    invoke Cell, ebx, 25, 00B7h, C_BORDER, C_KEEP     ; no sample / 0 WPM
+    jmp  wh_next
+wh_have:
+    mov  eax, histHead              ; sample index = head - (HIST_N - esi)
     add  eax, esi
-    add  eax, HIST_SIZE - HIST_N
+    sub  eax, HIST_N
     and  eax, HIST_SIZE - 1
     mov  eax, wpmHist[eax*4]
-    imul eax, eax, 3                ; level 0-3
+    mov  edx, 24                    ; height in eighths (0-24), rounded up
+    mul  edx
     add  eax, mx
     dec  eax
-    xor  edx, edx
     div  mx
-    movzx ecx, histChars[eax]
-    movzx edx, histAttrs[eax]
-    invoke PutCh, ebx, 29, ecx, edx
-st_next:
+    test eax, eax
+    jz   wh_dot
+    mov  h8, eax
+    mov  newest, 0
+    cmp  esi, HIST_N - 1
+    jne  wh_rows
+    mov  newest, 1
+wh_rows:
+    xor  edi, edi                   ; edi = row from the bottom
+wh_row:
+    cmp  edi, 3
+    jae  wh_next
+    mov  eax, edi
+    shl  eax, 3
+    mov  ecx, h8
+    sub  ecx, eax                   ; eighths left for this row
+    jle  wh_next
+    cmp  ecx, 8
+    jbe  wh_e
+    mov  ecx, 8
+wh_e:
+    push ecx
+    add  eax, ecx                   ; colour by height: purple -> pink
+    mov  edx, C_WHITE
+    cmp  newest, 0
+    jne  wh_c
+    invoke Lerp, C_PURP2, C_PINK, eax, 24
+    mov  edx, eax
+wh_c:
+    pop  ecx
+    push edx
+    invoke Eighth, ecx
+    pop  edx
+    mov  ecx, 25
+    sub  ecx, edi
+    invoke Cell, ebx, ecx, eax, edx, C_KEEP
+    inc  edi
+    jmp  wh_row
+wh_next:
     inc  esi
-    jmp  st_col
-st_tail:
-    invoke PutStr, 88, 29, ADDR sHistMax, A_MUTED_PG
-    invoke PutNum, eax, 29, mx, 0Fh
+    jmp  wh_col
+wh_done:
     ret
-DrawStrips ENDP
+DrawWpmHistory ENDP
 
-; ---- clickable button bar, hover highlight and status message ----
+; ---- one line of session stats under the panels ----
+DrawStatsLine PROC USES ebx
+    invoke Text, 2, 27, ADDR sLongest, C_MUTED, C_KEEP
+    invoke Num, eax, 27, longestWord, C_AMBER
+    invoke Text, eax, 27, ADDR sBackspaces, C_MUTED, C_KEEP
+    invoke Num, eax, 27, bsCount, C_AMBER
+    invoke Text, eax, 27, ADDR sErrRate, C_MUTED, C_KEEP
+    mov  ebx, eax
+    invoke Percent, bsCount, totalKeys
+    invoke Num, ebx, 27, eax, C_AMBER
+    invoke Cell, eax, 27, '%', C_AMBER, C_KEEP
+    ret
+DrawStatsLine ENDP
+
+; ---- two-tone pill buttons, hover highlight and status message ----
 DrawButtons PROC USES ebx esi edi
-    LOCAL blen:DWORD, battr:DWORD
+    LOCAL bw:DWORD, col:DWORD, dark:DWORD, pName:DWORD
     mov  ebx, 2                     ; x of the next button
     xor  esi, esi
 bt_loop:
-    cmp  esi, 4
+    cmp  esi, NBTN
     jae  bt_msg
-    mov  edi, btnLabels[esi*4]
-    movzx eax, btnAttrs[esi]
-    mov  battr, eax
-    cmp  esi, 2
-    jne  bt_len
+    mov  eax, btnNames[esi*4]
+    mov  pName, eax
+    mov  eax, btnColors[esi*4]
+    mov  col, eax
+    cmp  esi, 2                     ; pause button while paused
+    jne  bt_auto
     cmp  paused, 0
-    je   bt_len
-    mov  edi, OFFSET sBtnResume
-    mov  battr, A_BTN_PAUSED
-bt_len:
-    invoke StrLen, edi
-    mov  blen, eax
+    je   bt_size
+    mov  pName, OFFSET sBN2R
+    mov  col, C_PAUSEBTN
+    jmp  bt_size
+bt_auto:
+    cmp  esi, 3                     ; autosave button when on
+    jne  bt_size
+    cmp  autoSave, 0
+    je   bt_size
+    mov  pName, OFFSET sBN3On
+    mov  col, C_GREEN2
+bt_size:
+    invoke StrLen, btnKeys[esi*4]   ; width = edges + key + name
+    mov  edi, eax
+    invoke StrLen, pName
+    lea  eax, [eax+edi+2]
+    mov  bw, eax
     mov  btnX[esi*4], ebx
     mov  btnW[esi*4], eax
 
@@ -1430,15 +2110,20 @@ bt_len:
     cmp  eax, ebx
     jl   bt_draw
     mov  edx, ebx
-    add  edx, blen
+    add  edx, bw
     cmp  eax, edx
     jge  bt_draw
-    movzx eax, btnHot[esi]
-    mov  battr, eax
+    invoke Lerp, col, C_WHITE, 25, 100
+    mov  col, eax
 bt_draw:
-    invoke FillRect, ebx, BTN_Y, blen, 1, ' ', battr
-    invoke PutStr, ebx, BTN_Y, edi, battr
-    add  ebx, blen
+    invoke Lerp, col, C_BLACK, 35, 100
+    mov  dark, eax
+    invoke Cell, ebx, BTN_Y, 2590h, dark, C_PAGE
+    lea  eax, [ebx+1]
+    invoke Text, eax, BTN_Y, btnKeys[esi*4], C_WHITE, dark
+    invoke Text, eax, BTN_Y, pName, C_WHITE, col
+    invoke Cell, eax, BTN_Y, 258Ch, col, C_PAGE
+    add  ebx, bw
     add  ebx, 2
     inc  esi
     jmp  bt_loop
@@ -1450,24 +2135,26 @@ bt_msg:
     sub  eax, msgTick
     cmp  eax, MSG_TIME
     jae  bt_hint
-    invoke PutStr, 64, BTN_Y, msgPtr, msgAttr
+    invoke Text, 2, 29, msgPtr, msgColor, C_KEEP     ; message replaces the hint
+    ret
 bt_hint:
-    invoke PutStr, 2, 28, ADDR sHint, A_MUTED_PG
+    invoke Text, 2, 29, ADDR sHint, C_MUTED, C_KEEP
     ret
 DrawButtons ENDP
 
 ; ---- redraw every panel into the canvas, then flush once ----
 RenderAll PROC
     invoke UpdateStats
-    invoke FillRect, 0, 0, SCR_W, SCR_H, ' ', A_PAGE
+    invoke Fill, 0, 0, SCR_W, SCR_H, ' ', C_TEXT, C_PAGE
     invoke DrawHeader
     invoke DrawCards
     invoke DrawChips
     invoke DrawLastN
     invoke DrawHistogram
     invoke DrawHeatmap
-    invoke DrawTop5
-    invoke DrawStrips
+    invoke DrawRanks
+    invoke DrawWpmHistory
+    invoke DrawStatsLine
     invoke DrawButtons
     invoke Flush
     ret
@@ -1628,7 +2315,42 @@ br_top:
     inc  esi
     jmp  br_top
 
-br_freq:                            ; full frequency table
+br_freq:                            ; top bigrams and trigrams
+    invoke AppStr, ADDR rpBi
+    xor  esi, esi
+br_bi:
+    cmp  esi, bi5N
+    jae  br_tri0
+    invoke AppStr, ADDR rpIndent
+    lea  eax, [esi+'1']
+    invoke AppCh, eax
+    invoke AppStr, ADDR rpDot
+    invoke NgramName, bi5Idx[esi*4], 2
+    invoke AppPadded, eax
+    invoke AppStr, ADDR rpTimes
+    invoke AppNum, bi5Cnt[esi*4]
+    invoke AppStr, ADDR crlf
+    inc  esi
+    jmp  br_bi
+br_tri0:
+    invoke AppStr, ADDR rpTri
+    xor  esi, esi
+br_tri:
+    cmp  esi, tri5N
+    jae  br_table
+    invoke AppStr, ADDR rpIndent
+    lea  eax, [esi+'1']
+    invoke AppCh, eax
+    invoke AppStr, ADDR rpDot
+    invoke NgramName, tri5Idx[esi*4], 3
+    invoke AppPadded, eax
+    invoke AppStr, ADDR rpTimes
+    invoke AppNum, tri5Cnt[esi*4]
+    invoke AppStr, ADDR crlf
+    inc  esi
+    jmp  br_tri
+
+br_table:                           ; full frequency table                            ; full frequency table
     invoke AppStr, ADDR rpFreq
     xor  esi, esi
 br_fl:
@@ -1654,11 +2376,11 @@ BuildReport ENDP
 ; =============================================================
 
 ; ---- show a temporary status message for MSG_TIME ms ----
-SetMsg PROC pMsg:DWORD, attr:DWORD
+SetMsg PROC pMsg:DWORD, clr:DWORD
     mov  eax, pMsg
     mov  msgPtr, eax
-    mov  eax, attr
-    mov  msgAttr, eax
+    mov  eax, clr
+    mov  msgColor, eax
     invoke GetTickCount
     mov  msgTick, eax
     ret
@@ -1680,6 +2402,14 @@ DoReset PROC USES edi
     lea  edi, wpmHist
     mov  ecx, HIST_SIZE
     rep  stosd
+    lea  edi, bigrams
+    mov  ecx, NG2
+    rep  stosd
+    lea  edi, trigrams
+    mov  ecx, NG3
+    rep  stosd
+    mov  prevL1, -1
+    mov  prevL2, -1
     mov  vowels, eax
     mov  consonants, eax
     mov  digits, eax
@@ -1694,6 +2424,8 @@ DoReset PROC USES edi
     mov  bsCount, eax
     mov  histHead, eax
     mov  histCount, eax
+    mov  cardHead, eax
+    mov  cardCount, eax
     mov  lastHead, eax
     mov  lastCount, eax
     mov  tsHead, eax
@@ -1704,7 +2436,7 @@ DoReset PROC USES edi
     invoke GetTickCount
     mov  startTick, eax
     mov  lastSample, eax
-    invoke SetMsg, ADDR sMsgReset, A_CYAN AND 0Fh
+    invoke SetMsg, ADDR sMsgReset, C_CYAN
     ret
 DoReset ENDP
 
@@ -1717,10 +2449,10 @@ DoSave PROC USES ebx
     mov  ebx, eax
     invoke WriteFile, ebx, ADDR rptBuf, rptLen, ADDR nWritten, 0
     invoke CloseHandle, ebx
-    invoke SetMsg, ADDR sMsgSaved, 02h
+    invoke SetMsg, ADDR sMsgSaved, C_OK
     ret
 ds_fail:
-    invoke SetMsg, ADDR sMsgFail, 04h
+    invoke SetMsg, ADDR sMsgFail, C_RED
     ret
 DoSave ENDP
 
@@ -1740,7 +2472,7 @@ an_hi:
     ret
 AdjustN ENDP
 
-; ---- 0 reset, 1 save, 2 pause/resume, 3 quit ----
+; ---- 0 reset, 1 save, 2 pause/resume, 3 quit, 4 autosave on/off ----
 DoAction PROC actId:DWORD
     mov  eax, actId
     cmp  eax, 0
@@ -1758,13 +2490,24 @@ da_pause:
     xor  paused, 1
     cmp  paused, 0
     je   da_resume
-    invoke SetMsg, ADDR sMsgPause, 0Eh
+    invoke SetMsg, ADDR sMsgPause, C_GOLD
     ret
 da_resume:
-    invoke SetMsg, ADDR sMsgResume, 02h
+    invoke SetMsg, ADDR sMsgResume, C_OK
     ret
 da_quit:
+    cmp  eax, 3
+    jne  da_auto
     mov  quitFlag, 1
+    ret
+da_auto:
+    xor  autoSave, 1
+    cmp  autoSave, 0
+    je   da_autooff
+    invoke SetMsg, ADDR sMsgAutoOn, C_OK
+    ret
+da_autooff:
+    invoke SetMsg, ADDR sMsgAutoOff, C_RED
     ret
 DoAction ENDP
 
@@ -1805,13 +2548,7 @@ hk_f3:
 hk_f4:
     cmp  ebx, VK_F4
     jne  hk_left
-    xor  autoSave, 1
-    cmp  autoSave, 0
-    je   hk_f4off
-    invoke SetMsg, ADDR sMsgAutoOn, 02h
-    ret
-hk_f4off:
-    invoke SetMsg, ADDR sMsgAutoOff, 04h
+    invoke DoAction, 4
     ret
 hk_left:
     cmp  ebx, VK_LEFT
@@ -1867,7 +2604,7 @@ hm_btn:
     jne  hm_done
     xor  ebx, ebx
 hm_find:
-    cmp  ebx, 4
+    cmp  ebx, NBTN
     jae  hm_done
     mov  eax, mouseX
     cmp  eax, btnX[ebx*4]
@@ -1876,7 +2613,8 @@ hm_find:
     add  edx, btnW[ebx*4]
     cmp  eax, edx
     jge  hm_nextb
-    invoke DoAction, ebx
+    movzx eax, btnAction[ebx]
+    invoke DoAction, eax
     ret
 hm_nextb:
     inc  ebx
@@ -1958,6 +2696,13 @@ SetupScreen ENDP
 
 ; ---- undo SetupScreen: palette, cursor, code page, input mode ----
 RestoreScreen PROC USES ebx
+    cmp  vtOK, 0
+    je   rs_pal
+    mov  vtLen, 0                   ; default colours, clear, show cursor
+    invoke EmitA, ADDR vtReset
+    invoke WriteConsoleW, hOut, ADDR vtBuf, vtLen, ADDR nWritten, 0
+    invoke SetConsoleMode, hOut, oldOutMode
+rs_pal:
     cmp  havePalette, 0
     je   rs_rest
     inc  WORD PTR csbiOld+18        ; same inclusive/exclusive fix as above
@@ -2005,6 +2750,22 @@ start:
     mov  curNew, eax                 ; same size, but hidden
     invoke SetConsoleCursorInfo, hOut, ADDR curNew
     invoke SetupScreen
+    invoke GetConsoleMode, hOut, ADDR oldOutMode     ; true colour through VT sequences
+    mov  eax, oldOutMode
+    or   eax, VT_OUTPUT
+    invoke SetConsoleMode, hOut, eax
+    test eax, eax
+    jz   noVT
+    mov  vtOK, 1
+    mov  vtLen, 0
+    invoke EmitA, ADDR vtClear
+    invoke WriteConsoleW, hOut, ADDR vtBuf, vtLen, ADDR nWritten, 0
+noVT:
+    invoke GetEnvironmentVariableA, ADDR sWtEnv, ADDR envBuf, SIZEOF envBuf
+    test eax, eax
+    jz   startClock
+    mov  fineGlyphs, 1
+startClock:
     invoke GetTickCount
     mov  startTick, eax
     mov  lastSample, eax

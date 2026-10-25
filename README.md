@@ -30,22 +30,24 @@ Type anywhere in the console and watch live statistics: vowels vs. consonants, a
 
 | Feature | How it's done in MASM |
 |---------|-----------------------|
-| Flicker-free colour dashboard | Everything is drawn into a 100x30 `CHAR_INFO` array, then copied with one `WriteConsoleOutputA` call |
-| Custom colour theme | `SetConsoleScreenBufferInfoEx` replaces the 16 console colours; the original colours are restored on exit |
-| Big block-digit numbers | A 3x3 font made of CP437 block characters (`bigFont`) |
-| A-Z letter histogram | Bars use full and half blocks for double vertical resolution; vowels green, consonants amber |
-| Keyboard heatmap | QWERTY keys coloured cold to hot by how often each virtual key was pressed |
+| 24-bit colour dashboard | Every cell (Unicode character + RGB foreground + RGB background) is drawn into a 100x30 canvas, then sent as **one** `WriteConsoleW` call of VT escape sequences, so there is no flicker |
+| Gradients and rounded panels | Colours are blended per cell (`Lerp`, `Ramp`): gradient header, numbers, bars and heatmap; panels use rounded corners `╭╮╰╯` |
+| Works in any console | Windows Terminal gets the full look. The classic console gets the same colours with simpler bar characters (its font lacks 1/8 blocks). Without VT support it falls back to the 16-colour console (`WriteConsoleOutputW`, nearest colour per cell) |
+| Big numbers + sparklines | A 3x3 block font with a top-to-bottom gradient; each card has a sparkline of the last 16 seconds |
+| A-Z letter histogram | Bars built from 1/8-step blocks (`▁▂▃▄▅▆▇█`, 40 levels) with a vertical gradient; vowels green, consonants amber |
+| Keyboard heatmap | QWERTY keycaps on a smooth cold-to-hot colour ramp, by how often each virtual key was pressed |
 | Typing speed | Live WPM (keys in the last 5 s), peak WPM, average WPM and a session timer via `GetTickCount` |
-| Top 5 keys | Selection over the 256-entry frequency table, with bars and percentages |
+| Top 5 keys | Selection over the 256-entry frequency table |
+| N-gram tracker | Counts every letter pair (676-entry table) and letter triple (17,576-entry table) inside words; shows the top 5 bigrams and trigrams next to the top 5 keys |
 | Word counter | A run of letters/digits counts as one word; shown as a WORDS chip and in the report |
 | More categories | Separate counters for digits, spaces, symbols and other keys (Enter, Tab, Backspace...) |
 | Mouse buttons | `ReadConsoleInputA` mouse events: click Reset / Save / Pause / Quit, buttons highlight on hover |
 | Adjustable N | Left/Right arrows or the mouse wheel change N from 8 to 64 |
 | Pause | F3 stops counting (shown in the header and the button bar) |
 | Save report | F2 writes `KeyReport.txt` with `CreateFileA` / `WriteFile`; the same report is printed on exit |
-| Longest word + correction rate | Longest run of letters/digits, Backspace count and Backspace-to-keys ratio (row 26) |
-| WPM history graph | One WPM sample per second kept in a 64-entry ring; the last 60 s drawn as a block-character sparkline (row 29) |
-| Autosave on exit | F4 toggles saving `KeyReport.txt` automatically when you press ESC (off by default) |
+| Longest word + correction rate | Longest run of letters/digits, Backspace count and Backspace-to-keys ratio |
+| WPM history graph | One WPM sample per second kept in a 64-entry ring; the last 52 s drawn as a gradient area chart (24 levels) |
+| Autosave on exit | F4 (or its button) toggles saving `KeyReport.txt` automatically when you press ESC; the button turns green when on |
 
 ## Controls
 
@@ -105,8 +107,8 @@ link /subsystem:console KeyMonitor.obj kernel32.lib
 KeyMonitor.exe
 ```
 
+**Best in Windows Terminal** (built into Windows 11; free from the Microsoft Store on Windows 10). It also runs in the classic console with slightly simpler bars.
 The dashboard needs a console of at least 100 x 30 characters (the default Windows console is 120 x 30).
-If the colours look wrong in Windows Terminal, run it in the classic console instead: `conhost KeyMonitor.exe`.
 
 ## Sample report
 
@@ -114,27 +116,45 @@ Printed when you press ESC, and saved to `KeyReport.txt` with F2:
 
 ```
 ========== KEY PRESS MONITOR - REPORT ==========
-Total keys       : 137
-Total Vowels     : 37
-Total Consonants : 64
+Total keys       : 166
+Total Vowels     : 43
+Total Consonants : 78
 Digits           : 6
-Spaces           : 26
-Symbols          : 3
-Other keys       : 1
-Peak WPM         : 88
+Spaces           : 31
+Symbols          : 5
+Other keys       : 3
+Words typed      : 34
+Longest word     : 6
+Backspaces       : 2
+Correction rate %: 1
+Peak WPM         : 91
 Average WPM      : 70
-Session time     : 00:23
-Last N chars     : [ easy peasy, see you at the demo]
+Session time     : 00:28
+Last N chars     : [asy, see you at the demo]
 
 Top 5 keys:
-  1.  SPC   x 26
-  2.  e     x 12
-  3.  o     x 9
-  4.  s     x 6
-  5.  a     x 5
+  1.  SPC   x 31
+  2.  e     x 17
+  3.  h     x 9
+  4.  o     x 9
+  5.  t     x 9
+
+Top 5 bigrams:
+  1.  th    x 7
+  2.  he    x 6
+  3.  as    x 3
+  4.  en    x 3
+  5.  ck    x 2
+
+Top 5 trigrams:
+  1.  the   x 5
+  2.  asy   x 2
+  3.  eas   x 2
+  4.  ack   x 1
+  5.  asm   x 1
 
 Key Frequency:
-  e    (ASCII 101)  ->  12
+  e    (ASCII 101)  ->  17
   ...
 ```
 
@@ -149,7 +169,8 @@ Key Frequency:
 | `lastRing` (64 bytes) | Circular buffer of the last N keys; the index wraps with `AND 63` |
 | `tsRing` (128 DWORDs) | Time of each recent key press, used for WPM |
 | Vowel check | Converts letter to lowercase, compares with `"aeiou"` |
-| `canvas` | 100 x 30 cells drawn every frame, then copied to the screen in one call |
+| `canvas` | 100 x 30 cells (character, foreground, background) drawn every frame |
+| `FlushVT` | Turns the canvas into VT escape sequences (`ESC[38;2;r;g;b;48;2;r;g;bm`) and writes the frame with one `WriteConsoleW` |
 
 To change the default N, edit 
 View DD 32` in `KeyMonitor.asm` (8 to 64).
