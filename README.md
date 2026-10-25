@@ -1,11 +1,23 @@
-# KeyPressMonitor (MASM Assembly)
+<div align="center">
 
-A 32-bit MASM program for Windows that watches key presses in real time and shows them on a live, full-screen dashboard.
+# ⌨️ KeyPressMonitor
 
-It only uses `kernel32.lib`, so you **don't** need Irvine32 or the MASM32 SDK.
+**A real-time keyboard analytics dashboard written entirely in 32-bit MASM assembly.**
+
+![Platform](https://img.shields.io/badge/platform-Windows-0078D6?logo=windows&logoColor=white)
+![Language](https://img.shields.io/badge/language-MASM%20x86-informational)
+![Dependencies](https://img.shields.io/badge/dependencies-kernel32%20only-success)
+![License](https://img.shields.io/badge/license-MIT-blue)
 
 ![Dashboard while typing](screenshots/dashboard.png)
 
+</div>
+
+Type anywhere in the console and watch live statistics: vowels vs. consonants, a per-key frequency histogram, a keyboard heatmap, typing speed (WPM) and a rolling view of the last N characters. No Irvine32, no MASM32 SDK: just `kernel32.lib`.
+
+## Table of contents
+
+- [Features](#features) · [Controls](#controls) · [Quick start](#quick-start) · [Sample report](#sample-report) · [How it works](#how-it-works-short) · [Project layout](#project-layout) · [Troubleshooting](#troubleshooting) · [License](#license)
 ## Features
 
 **Required**
@@ -49,20 +61,22 @@ All buttons can also be clicked with the mouse.
 
 ---
 
-## 1. Install the tools (one time only)
+## Quick start
+
+### 1. Install the tools (one time only)
 
 1. Download **Visual Studio Community** (free): https://visualstudio.microsoft.com/
 2. In the installer, tick **"Desktop development with C++"** and install.
    This gives you `ml.exe` (MASM) and `link.exe`.
 
-## 2. Get the code
+### 2. Get the code
 
 ```bat
-git clone https://github.com/Hrishikesh-coder/KeyPressMonitor.git
+git clone https://github.com/Aricode2005/KeyPressMonitor.git
 cd KeyPressMonitor
 ```
 
-## 3. Build
+### 3. Build
 
 1. Open the Start menu and search for **"x86 Native Tools Command Prompt for VS"**.
    > It must be **x86** (32-bit), not x64.
@@ -80,7 +94,7 @@ ml /c /coff KeyMonitor.asm
 link /subsystem:console KeyMonitor.obj kernel32.lib
 ```
 
-## 4. Run
+### 4. Run
 
 ```bat
 KeyMonitor.exe
@@ -132,11 +146,28 @@ Key Frequency:
 | Vowel check | Converts letter to lowercase, compares with `"aeiou"` |
 | `canvas` | 100 x 30 cells drawn every frame, then copied to the screen in one call |
 
-To change the default N, edit `nView DD 32` in `KeyMonitor.asm` (8 to 64).
+To change the default N, edit 
+View DD 32` in `KeyMonitor.asm` (8 to 64).
 
 ## Troubleshooting
 
-- **`'ml' is not recognized`** – you're not in the *x86 Native Tools Command Prompt*.
-- **`cannot open file 'kernel32.lib'`** – same reason; use the x86 Native Tools prompt.
-- **Dashboard is cut off** – make the console window at least 100 x 30, or maximise it.
+- **`'ml' is not recognized`** â€“ you're not in the *x86 Native Tools Command Prompt*.
+- **`cannot open file 'kernel32.lib'`** â€“ same reason; use the x86 Native Tools prompt.
+- **Dashboard is cut off** â€“ make the console window at least 100 x 30, or maximise it.
 - Arrow / function keys don't produce characters, so they are not counted (they're used as controls).
+
+## Project layout
+
+```
+KeyPressMonitor/
+├── KeyMonitor.asm     # the whole program
+├── build.bat          # one-step build (x86 Native Tools prompt)
+├── screenshots/       # images used in this README
+├── .github/workflows/ # CI: builds the project on every push
+├── CONTRIBUTING.md
+└── LICENSE
+```
+
+## License
+
+Released under the [MIT License](LICENSE).
