@@ -37,6 +37,7 @@ Type anywhere in the console and watch live statistics: vowels vs. consonants, a
 | Keyboard heatmap | QWERTY keys coloured cold to hot by how often each virtual key was pressed |
 | Typing speed | Live WPM (keys in the last 5 s), peak WPM, average WPM and a session timer via `GetTickCount` |
 | Top 5 keys | Selection over the 256-entry frequency table, with bars and percentages |
+| Word counter | A run of letters/digits counts as one word; shown as a WORDS chip and in the report |
 | More categories | Separate counters for digits, spaces, symbols and other keys (Enter, Tab, Backspace...) |
 | Mouse buttons | `ReadConsoleInputA` mouse events: click Reset / Save / Pause / Quit, buttons highlight on hover |
 | Adjustable N | Left/Right arrows or the mouse wheel change N from 8 to 64 |
