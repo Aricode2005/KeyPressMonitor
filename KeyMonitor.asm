@@ -65,12 +65,15 @@ VK_RIGHT          EQU 27h
 VK_F1             EQU 70h
 VK_F2             EQU 71h
 VK_F3             EQU 72h
+VK_F4             EQU 73h
 
 SCR_W             EQU 100         ; dashboard size in character cells
 SCR_H             EQU 30
 NMAX              EQU 64          ; largest N (power of two -> wrap with AND)
 NMIN              EQU 8
 TS_SIZE           EQU 128         ; key timestamps kept for WPM
+HIST_N            EQU 60          ; WPM history: one sample per second, last 60 s
+HIST_SIZE         EQU 64          ; ring size (power of two)
 WPM_WINDOW        EQU 5000        ; WPM measured over the last 5 seconds
 MSG_TIME          EQU 3000        ; status message shown for 3 seconds
 BTN_Y             EQU 27          ; row of the button bar
@@ -128,6 +131,17 @@ spaces       DD 0
 symbols      DD 0
 others       DD 0
 totalKeys    DD 0
+words        DD 0                 ; words typed (runs of letters/digits)
+inWord       DD 0
+curCat       DD 0
+curWordLen   DD 0                 ; length of the word being typed
+longestWord  DD 0                 ; longest word this session
+bsCount      DD 0                 ; Backspace presses (typing corrections)
+autoSave     DD 0                 ; F4: save the report automatically on exit
+wpmHist      DD HIST_SIZE DUP(0)  ; WPM sampled once per second
+histHead     DD 0
+histCount    DD 0
+lastSample   DD 0
 freq         DD 256 DUP(0)        ; frequency table, indexed by ASCII code
 vkFreq       DD 256 DUP(0)        ; frequency by virtual key (for the heatmap)
 lastRing     DB NMAX DUP(0)       ; last N characters, circular buffer
@@ -225,6 +239,19 @@ sDigits      DB "DIGITS ", 0
 sSpaces      DB "SPACES ", 0
 sSymbols     DB "SYMBOLS ", 0
 sOther       DB "OTHER ", 0
+sWords       DB "WORDS ", 0
+sLongest     DB "LONGEST WORD ", 0
+sBackspaces  DB "   BACKSPACES ", 0
+sErrRate     DB "   CORRECTION RATE ", 0
+sAuto        DB "F4 AUTOSAVE ", 0
+sOn          DB "ON", 0
+sOff         DB "OFF", 0
+sHistory     DB "WPM HISTORY  last 60 s", 0
+sHistMax     DB "max ", 0
+sMsgAutoOn   DB 0FBh, " Report will be saved on exit", 0
+sMsgAutoOff  DB "x Autosave off", 0
+histChars    DB 0FAh, 0DCh, 0DBh, 0DBh
+histAttrs    DB 08h, 05h, 05h, 0Fh
 sBoxLast     DB " LAST N CHARACTERS ", 0
 sNEq         DB " N = ", 0
 sNHint       DB "  (<- ->  or mouse wheel) ", 0
@@ -271,6 +298,10 @@ rpDig        DB "Digits           : ", 0
 rpSpc        DB "Spaces           : ", 0
 rpSym        DB "Symbols          : ", 0
 rpOth        DB "Other keys       : ", 0
+rpWords      DB "Words typed      : ", 0
+rpLong       DB "Longest word     : ", 0
+rpBs         DB "Backspaces       : ", 0
+rpErr        DB "Correction rate %: ", 0
 rpPeak       DB "Peak WPM         : ", 0
 rpAvg        DB "Average WPM      : ", 0
 rpTime       DB "Session time     : ", 0
@@ -604,8 +635,13 @@ CountChar PROC USES ebx kc:DWORD, vk:DWORD
     and  eax, 0FFh
     inc  vkFreq[eax*4]
     mov  lastKeyCode, ebx
+    cmp  ebx, 8                     ; Backspace = a correction
+    jne  cc_nobs
+    inc  bsCount
+cc_nobs:
 
     invoke Classify, ebx            ; requirement (a)
+    mov  curCat, eax
     cmp  eax, CAT_VOWEL
     jne  cc_cons
     inc  vowels
@@ -638,7 +674,29 @@ cc_sym:
 cc_other:
     inc  others
 
-cc_glyph:                           ; character shown in the last-N view
+cc_glyph:                           ; word counter: a run of letters/digits is one word
+    mov  eax, curCat
+    cmp  eax, CAT_VOWEL
+    je   cc_inword
+    cmp  eax, CAT_CONS
+    je   cc_inword
+    cmp  eax, CAT_DIGIT
+    je   cc_inword
+    mov  inWord, 0
+    jmp  cc_shown
+cc_inword:
+    cmp  inWord, 0
+    jne  cc_wlen
+    inc  words
+    mov  inWord, 1
+    mov  curWordLen, 0
+cc_wlen:                            ; longest word of the session
+    inc  curWordLen
+    mov  eax, curWordLen
+    cmp  eax, longestWord
+    jbe  cc_shown
+    mov  longestWord, eax
+cc_shown:                          ; character shown in the last-N view
     mov  eax, ebx
     cmp  eax, 32
     jb   cc_ctrl
@@ -780,7 +838,23 @@ us_avg:
     mul  edx
     div  ecx
     mov  wpmAvg, eax
-us_top:
+us_top:                             ; one WPM sample per second for the history graph
+    mov  eax, nowTick
+    sub  eax, lastSample
+    cmp  eax, 1000
+    jb   us_top5
+    mov  eax, nowTick
+    mov  lastSample, eax
+    mov  ecx, histHead
+    mov  eax, wpmNow
+    mov  wpmHist[ecx*4], eax
+    inc  ecx
+    and  ecx, HIST_SIZE - 1
+    mov  histHead, ecx
+    cmp  histCount, HIST_N
+    jae  us_top5
+    inc  histCount
+us_top5:
     invoke ComputeTop5
     ret
 UpdateStats ENDP
@@ -832,6 +906,7 @@ KeyName ENDP
 ;  Dashboard sections
 ; =============================================================
 
+; ---- title bar: name, subtitle, LIVE/PAUSED badge and session timer ----
 DrawHeader PROC
     invoke FillRect, 0, 0, SCR_W, 1, ' ', A_HDR
     invoke PutCh, 2, 0, 0FEh, A_HDR_ACC
@@ -856,6 +931,7 @@ dh_time:
     ret
 DrawHeader ENDP
 
+; ---- the four big stat cards: vowels, consonants, total keys, WPM ----
 DrawCards PROC USES ebx
     mov  ebx, vowels
     add  ebx, consonants            ; ebx = letters typed
@@ -898,11 +974,13 @@ Chip PROC USES ebx px:DWORD, pLabel:DWORD, val:DWORD, attr:DWORD
     ret
 Chip ENDP
 
+; ---- row of small counters: digits, spaces, symbols, other keys ----
 DrawChips PROC USES ebx esi
     invoke Chip, 2, ADDR sDigits, digits, A_CYAN
     invoke Chip, eax, ADDR sSpaces, spaces, A_PANEL_HI
     invoke Chip, eax, ADDR sSymbols, symbols, A_PURPLE
     invoke Chip, eax, ADDR sOther, others, A_PANEL_HI
+    invoke Chip, eax, ADDR sWords, words, A_VOWEL
 
     ; vowel / consonant mix bar (columns 62-94)
     invoke PutCh, 60, 8, 'V', 02h
@@ -927,6 +1005,7 @@ dc_bar:
     ret
 DrawChips ENDP
 
+; ---- "last N characters" panel; the newest key is highlighted ----
 DrawLastN PROC USES ebx esi edi
     LOCAL show:DWORD, firstIdx:DWORD
     invoke DrawBox, 2, 9, 96, 3, ADDR sBoxLast, A_BORDER, A_PANEL_HI
@@ -1004,6 +1083,7 @@ ln_has:
     ret
 DrawLastN ENDP
 
+; ---- A-Z letter histogram with half-block bars and a vowel/consonant mix bar ----
 DrawHistogram PROC USES ebx esi edi
     LOCAL maxL:DWORD, realMax:DWORD, cnt:DWORD, hh:DWORD, col:DWORD, attr:DWORD, lattr:DWORD
     invoke DrawBox, 2, 12, 56, 14, ADDR sBoxHist, A_BORDER, A_PANEL_HI
@@ -1122,6 +1202,7 @@ ha_pick:
     ret
 HeatAttr ENDP
 
+; ---- QWERTY keyboard coloured cold to hot by key usage ----
 DrawHeatmap PROC USES ebx esi edi
     LOCAL rowI:DWORD, kx:DWORD, ky:DWORD, pVk:DWORD
     invoke DrawBox, 59, 12, 39, 7, ADDR sBoxHeat, A_BORDER, A_PANEL_HI
@@ -1192,6 +1273,7 @@ hm_leg:
     ret
 DrawHeatmap ENDP
 
+; ---- ranked table of the five most used keys ----
 DrawTop5 PROC USES ebx esi edi
     LOCAL ky:DWORD, barLen:DWORD, attr:DWORD
     invoke DrawBox, 59, 19, 39, 7, ADDR sBoxTop, A_BORDER, A_PANEL_HI
@@ -1245,6 +1327,81 @@ tp_done:
     ret
 DrawTop5 ENDP
 
+; ---- bottom strips: session stats (row 26) and WPM history graph (row 29) ----
+DrawStrips PROC USES ebx esi
+    LOCAL mx:DWORD
+    invoke PutStr, 2, 26, ADDR sLongest, A_MUTED_PG
+    invoke PutNum, eax, 26, longestWord, 0Eh
+    invoke PutStr, eax, 26, ADDR sBackspaces, A_MUTED_PG
+    invoke PutNum, eax, 26, bsCount, 0Eh
+    invoke PutStr, eax, 26, ADDR sErrRate, A_MUTED_PG
+    mov  ebx, eax
+    invoke Percent, bsCount, totalKeys
+    invoke PutNum, ebx, 26, eax, 0Eh
+    invoke PutCh, eax, 26, '%', 0Eh
+    invoke PutStr, 78, 26, ADDR sAuto, A_MUTED_PG
+    cmp  autoSave, 0
+    je   st_off
+    invoke PutStr, eax, 26, ADDR sOn, 0Ah
+    jmp  st_hist
+st_off:
+    invoke PutStr, eax, 26, ADDR sOff, 08h
+
+st_hist:
+    invoke PutStr, 2, 29, ADDR sHistory, A_MUTED_PG
+    mov  mx, 20                     ; scale: at least 20 WPM
+    xor  esi, esi
+st_max:
+    cmp  esi, HIST_N
+    jae  st_draw
+    mov  ecx, HIST_N
+    sub  ecx, histCount
+    cmp  esi, ecx
+    jb   st_mnext
+    mov  eax, histHead
+    add  eax, esi
+    add  eax, HIST_SIZE - HIST_N
+    and  eax, HIST_SIZE - 1
+    mov  eax, wpmHist[eax*4]
+    cmp  eax, mx
+    jbe  st_mnext
+    mov  mx, eax
+st_mnext:
+    inc  esi
+    jmp  st_max
+st_draw:
+    xor  esi, esi
+st_col:
+    cmp  esi, HIST_N
+    jae  st_tail
+    lea  ebx, [esi+26]              ; graph x position
+    mov  ecx, HIST_N
+    sub  ecx, histCount
+    cmp  esi, ecx
+    jb   st_next                    ; no sample yet
+    mov  eax, histHead
+    add  eax, esi
+    add  eax, HIST_SIZE - HIST_N
+    and  eax, HIST_SIZE - 1
+    mov  eax, wpmHist[eax*4]
+    imul eax, eax, 3                ; level 0-3
+    add  eax, mx
+    dec  eax
+    xor  edx, edx
+    div  mx
+    movzx ecx, histChars[eax]
+    movzx edx, histAttrs[eax]
+    invoke PutCh, ebx, 29, ecx, edx
+st_next:
+    inc  esi
+    jmp  st_col
+st_tail:
+    invoke PutStr, 88, 29, ADDR sHistMax, A_MUTED_PG
+    invoke PutNum, eax, 29, mx, 0Fh
+    ret
+DrawStrips ENDP
+
+; ---- clickable button bar, hover highlight and status message ----
 DrawButtons PROC USES ebx esi edi
     LOCAL blen:DWORD, battr:DWORD
     mov  ebx, 2                     ; x of the next button
@@ -1299,6 +1456,7 @@ bt_hint:
     ret
 DrawButtons ENDP
 
+; ---- redraw every panel into the canvas, then flush once ----
 RenderAll PROC
     invoke UpdateStats
     invoke FillRect, 0, 0, SCR_W, SCR_H, ' ', A_PAGE
@@ -1309,6 +1467,7 @@ RenderAll PROC
     invoke DrawHistogram
     invoke DrawHeatmap
     invoke DrawTop5
+    invoke DrawStrips
     invoke DrawButtons
     invoke Flush
     ret
@@ -1318,6 +1477,7 @@ RenderAll ENDP
 ;  Report (F2 saves it, ESC prints it)
 ; =============================================================
 
+; ---- report builder: append a zero-terminated string ----
 AppStr PROC USES esi edi pStr:DWORD
     mov  esi, pStr
     mov  edi, OFFSET rptBuf
@@ -1336,6 +1496,7 @@ as_done:
     ret
 AppStr ENDP
 
+; ---- report builder: append one character ----
 AppCh PROC chv:DWORD
     mov  edx, rptLen
     mov  eax, chv
@@ -1344,12 +1505,14 @@ AppCh PROC chv:DWORD
     ret
 AppCh ENDP
 
+; ---- report builder: append an unsigned decimal number ----
 AppNum PROC val:DWORD
     invoke NumToStr, val
     invoke AppStr, eax
     ret
 AppNum ENDP
 
+; ---- report builder: append "label value" and a line break ----
 AppLine PROC pLabel:DWORD, val:DWORD
     invoke AppStr, pLabel
     invoke AppNum, val
@@ -1372,6 +1535,7 @@ ap_done:
     ret
 AppPadded ENDP
 
+; ---- report builder: append two digits with a leading zero ----
 AppTwo PROC val:DWORD
     mov  eax, val
     xor  edx, edx
@@ -1386,6 +1550,7 @@ AppTwo PROC val:DWORD
     ret
 AppTwo ENDP
 
+; ---- assemble the full text report into rptBuf ----
 BuildReport PROC USES ebx esi edi
     mov  rptLen, 0
     invoke UpdateStats
@@ -1397,6 +1562,11 @@ BuildReport PROC USES ebx esi edi
     invoke AppLine, ADDR rpSpc, spaces
     invoke AppLine, ADDR rpSym, symbols
     invoke AppLine, ADDR rpOth, others
+    invoke AppLine, ADDR rpWords, words
+    invoke AppLine, ADDR rpLong, longestWord
+    invoke AppLine, ADDR rpBs, bsCount
+    invoke Percent, bsCount, totalKeys
+    invoke AppLine, ADDR rpErr, eax
     invoke AppLine, ADDR rpPeak, wpmPeak
     invoke AppLine, ADDR rpAvg, wpmAvg
 
@@ -1483,6 +1653,7 @@ BuildReport ENDP
 ;  Actions
 ; =============================================================
 
+; ---- show a temporary status message for MSG_TIME ms ----
 SetMsg PROC pMsg:DWORD, attr:DWORD
     mov  eax, pMsg
     mov  msgPtr, eax
@@ -1493,6 +1664,7 @@ SetMsg PROC pMsg:DWORD, attr:DWORD
     ret
 SetMsg ENDP
 
+; ---- clear every counter and buffer ----
 DoReset PROC USES edi
     cld
     xor  eax, eax
@@ -1505,6 +1677,9 @@ DoReset PROC USES edi
     lea  edi, tsRing
     mov  ecx, TS_SIZE
     rep  stosd
+    lea  edi, wpmHist
+    mov  ecx, HIST_SIZE
+    rep  stosd
     mov  vowels, eax
     mov  consonants, eax
     mov  digits, eax
@@ -1512,6 +1687,13 @@ DoReset PROC USES edi
     mov  symbols, eax
     mov  others, eax
     mov  totalKeys, eax
+    mov  words, eax
+    mov  inWord, eax
+    mov  curWordLen, eax
+    mov  longestWord, eax
+    mov  bsCount, eax
+    mov  histHead, eax
+    mov  histCount, eax
     mov  lastHead, eax
     mov  lastCount, eax
     mov  tsHead, eax
@@ -1521,10 +1703,12 @@ DoReset PROC USES edi
     mov  lastKeyCode, -1
     invoke GetTickCount
     mov  startTick, eax
+    mov  lastSample, eax
     invoke SetMsg, ADDR sMsgReset, A_CYAN AND 0Fh
     ret
 DoReset ENDP
 
+; ---- write the report to KeyReport.txt ----
 DoSave PROC USES ebx
     invoke BuildReport
     invoke CreateFileA, ADDR sReportFile, 40000000h, 0, 0, 2, 80h, 0
@@ -1540,6 +1724,7 @@ ds_fail:
     ret
 DoSave ENDP
 
+; ---- change N by delta, clamped to NMIN..NMAX ----
 AdjustN PROC delta:DWORD
     mov  eax, nView
     add  eax, delta
@@ -1587,6 +1772,7 @@ DoAction ENDP
 ;  Input
 ; =============================================================
 
+; ---- process a key event: control keys first, then count the character ----
 HandleKey PROC USES ebx esi edi
     cmp  DWORD PTR inRec+4, 0       ; key released -> ignore
     je   hk_done
@@ -1613,8 +1799,19 @@ hk_f2:
     ret
 hk_f3:
     cmp  ebx, VK_F3
-    jne  hk_left
+    jne  hk_f4
     invoke DoAction, 2
+    ret
+hk_f4:
+    cmp  ebx, VK_F4
+    jne  hk_left
+    xor  autoSave, 1
+    cmp  autoSave, 0
+    je   hk_f4off
+    invoke SetMsg, ADDR sMsgAutoOn, 02h
+    ret
+hk_f4off:
+    invoke SetMsg, ADDR sMsgAutoOff, 04h
     ret
 hk_left:
     cmp  ebx, VK_LEFT
@@ -1639,6 +1836,7 @@ hk_done:
     ret
 HandleKey ENDP
 
+; ---- process a mouse event: hover, button clicks, wheel ----
 HandleMouse PROC USES ebx
     movsx eax, WORD PTR inRec+4
     sub  eax, offX
@@ -1691,6 +1889,7 @@ HandleMouse ENDP
 ;  Console setup / restore
 ; =============================================================
 
+; ---- configure console input/output, palette, cursor and window size ----
 SetupScreen PROC USES esi edi
     mov  DWORD PTR csbiOld, 96
     invoke GetConsoleScreenBufferInfoEx, hOut, ADDR csbiOld
@@ -1757,6 +1956,7 @@ ss_clear:
     ret
 SetupScreen ENDP
 
+; ---- undo SetupScreen: palette, cursor, code page, input mode ----
 RestoreScreen PROC USES ebx
     cmp  havePalette, 0
     je   rs_rest
@@ -1781,6 +1981,7 @@ rs_chars:
     ret
 RestoreScreen ENDP
 
+; ---- print a zero-terminated string with WriteConsoleA ----
 ConPrint PROC pStr:DWORD
     invoke StrLen, pStr
     invoke WriteConsoleA, hOut, pStr, eax, ADDR nWritten, 0
@@ -1806,6 +2007,7 @@ start:
     invoke SetupScreen
     invoke GetTickCount
     mov  startTick, eax
+    mov  lastSample, eax
 
 mainLoop:
     invoke RenderAll
@@ -1832,7 +2034,13 @@ checkQuit:
     cmp  quitFlag, 0
     je   readEvents
 
-    ; ---- quit: restore the console and print the final report ----
+    ; ---- quit: optional autosave, restore the console, print the report ----
+    cmp  autoSave, 0
+    je   skipSave
+    cmp  totalKeys, 0
+    je   skipSave
+    invoke DoSave
+skipSave:
     invoke BuildReport
     invoke RestoreScreen
     invoke WriteConsoleA, hOut, ADDR rptBuf, rptLen, ADDR nWritten, 0

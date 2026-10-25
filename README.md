@@ -37,11 +37,15 @@ Type anywhere in the console and watch live statistics: vowels vs. consonants, a
 | Keyboard heatmap | QWERTY keys coloured cold to hot by how often each virtual key was pressed |
 | Typing speed | Live WPM (keys in the last 5 s), peak WPM, average WPM and a session timer via `GetTickCount` |
 | Top 5 keys | Selection over the 256-entry frequency table, with bars and percentages |
+| Word counter | A run of letters/digits counts as one word; shown as a WORDS chip and in the report |
 | More categories | Separate counters for digits, spaces, symbols and other keys (Enter, Tab, Backspace...) |
 | Mouse buttons | `ReadConsoleInputA` mouse events: click Reset / Save / Pause / Quit, buttons highlight on hover |
 | Adjustable N | Left/Right arrows or the mouse wheel change N from 8 to 64 |
 | Pause | F3 stops counting (shown in the header and the button bar) |
 | Save report | F2 writes `KeyReport.txt` with `CreateFileA` / `WriteFile`; the same report is printed on exit |
+| Longest word + correction rate | Longest run of letters/digits, Backspace count and Backspace-to-keys ratio (row 26) |
+| WPM history graph | One WPM sample per second kept in a 64-entry ring; the last 60 s drawn as a block-character sparkline (row 29) |
+| Autosave on exit | F4 toggles saving `KeyReport.txt` automatically when you press ESC (off by default) |
 
 ## Controls
 
@@ -50,6 +54,7 @@ Type anywhere in the console and watch live statistics: vowels vs. consonants, a
 | F1 | Reset all counters |
 | F2 | Save report to `KeyReport.txt` |
 | F3 | Pause / resume counting |
+| F4 | Toggle autosave of the report on exit |
 | Left / Right, mouse wheel | Change N |
 | ESC | Quit and print the final report |
 
