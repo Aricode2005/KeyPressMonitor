@@ -21,8 +21,13 @@
 ;  10. WPM history graph for the last 52 seconds
 ;  11. Mouse-clickable buttons, adjustable N, pause, save report,
 ;      autosave on exit
+;  12. Key-press ripple on the heatmap and count-up card numbers
+;  13. Typing test screen (F5): live WPM, accuracy, errors, personal best
+;  14. HTML report with charts (F2), opened in the browser
+;  15. Compare with the last session (saved in KeyStats.dat)
 ;
-;  Keys:  F1 reset   F2 save report   F3 pause   F4 autosave   ESC quit
+;  Keys:  F1 reset   F2 save report   F3 pause   F4 autosave
+;         F5 typing test   ESC quit
 ;         Left / Right arrow (or mouse wheel) change N
 ;
 ;  Uses only kernel32.lib (comes with Visual Studio / Windows SDK).
@@ -58,7 +63,16 @@ CreateFileA                   PROTO :DWORD, :DWORD, :DWORD, :DWORD, :DWORD, :DWO
 WriteFile                     PROTO :DWORD, :DWORD, :DWORD, :DWORD, :DWORD
 CloseHandle                   PROTO :DWORD
 ExitProcess                   PROTO :DWORD
+ReadFile                      PROTO :DWORD, :DWORD, :DWORD, :DWORD, :DWORD
+CreateProcessA                PROTO :DWORD, :DWORD, :DWORD, :DWORD, :DWORD, :DWORD, :DWORD, :DWORD, :DWORD, :DWORD
+GetLocalTime                  PROTO :DWORD
 includelib kernel32.lib
+
+; ---------- procedures used before their definition ----------
+Tween                         PROTO :DWORD, :DWORD
+RippleSetup                   PROTO
+RippleMix                     PROTO :DWORD, :DWORD, :DWORD
+DrawCompare                   PROTO
 
 STD_INPUT_HANDLE  EQU -10
 STD_OUTPUT_HANDLE EQU -11
@@ -74,6 +88,7 @@ VK_F1             EQU 70h
 VK_F2             EQU 71h
 VK_F3             EQU 72h
 VK_F4             EQU 73h
+VK_F5             EQU 74h
 
 SCR_W             EQU 100         ; dashboard size in character cells
 SCR_H             EQU 30
@@ -85,7 +100,23 @@ HIST_SIZE         EQU 64          ; ring size (power of two)
 WPM_WINDOW        EQU 5000        ; WPM measured over the last 5 seconds
 MSG_TIME          EQU 3000        ; status message shown for 3 seconds
 BTN_Y             EQU 28          ; row of the button bar
-NBTN              EQU 5           ; number of buttons
+NBTN              EQU 6           ; number of buttons
+NSENT             EQU 6           ; typing test sentences
+RIPPLE_MS         EQU 600         ; heatmap ripple length
+RIPPLE_STEP       EQU 70          ; ms for the ripple to move one key further
+STAT_N            EQU 12          ; DWORDs in KeyStats.dat
+STAT_MAGIC        EQU 314D504Bh   ; "KPM1"
+ST_TOTAL          EQU 1           ; KeyStats.dat fields (DWORD index)
+ST_VOW            EQU 2
+ST_CON            EQU 3
+ST_WORDS          EQU 4
+ST_PEAK           EQU 5
+ST_AVG            EQU 6
+ST_TIME           EQU 7
+ST_BS             EQU 8
+ST_BEST           EQU 9           ; best peak WPM of all sessions
+ST_TBEST          EQU 10          ; best typing test WPM of all sessions
+ST_SESS           EQU 11          ; number of sessions
 NG2               EQU 26 * 26     ; possible bigrams (a-z)
 NG3               EQU 26 * 26 * 26 ; possible trigrams
 
@@ -205,6 +236,47 @@ tri5Cnt      DD 5 DUP(0)
 tri5N        DD 0
 prevL1       DD -1                ; previous letter (0-25), -1 = none
 prevL2       DD -1                ; letter before that
+
+viewMode     DD 0                 ; 0 = dashboard, 1 = typing test
+frameWait    DD 250               ; ms to wait for input (30 while animating)
+animating    DD 0
+rippleVk     DD -1                ; last key pressed, for the heatmap ripple
+rippleTick   DD 0
+rippleOn     DD 0
+rippleX      DD 0
+rippleY      DD 0
+rippleAge    DD 0
+dispV        DD 0                 ; card numbers as shown (count up to the real value)
+dispC        DD 0
+dispT        DD 0
+
+; ---- typing test ----
+testIdx      DD NSENT - 1         ; sentence index (NewTest moves to the next)
+testPtr      DD 0
+testLen      DD 0
+testPos      DD 0                 ; characters typed
+testKeys     DD 0                 ; keys typed (not counting Backspace)
+testErrors   DD 0                 ; wrong keys, even if fixed later
+testStart    DD 0
+testEnd      DD 0
+testDone     DD 0
+testNewBest  DD 0
+testBest     DD 0                 ; best WPM this session
+tWpm         DD 0                 ; live numbers from TestLive
+tAcc         DD 0
+tSec         DD 0
+testTyped    DB 128 DUP(0)
+
+; ---- last session (KeyStats.dat) ----
+hasLast      DD 0
+bestPeakAll  DD 0
+bestTestAll  DD 0
+lastStats    DD STAT_N DUP(0)
+statBuf      DD STAT_N DUP(0)
+sysTime      DW 8 DUP(0)          ; SYSTEMTIME for the report date
+appBase      DD OFFSET rptBuf     ; buffer the App* builders write to
+startInfo    DD 68, 16 DUP(0)     ; STARTUPINFOA (cb = 68)
+procInfo     DD 4 DUP(0)          ; PROCESS_INFORMATION
 
 paused       DD 0
 quitFlag     DD 0
@@ -329,24 +401,34 @@ sBK2         DB " F3 ", 0
 sBK3         DB " F4 ", 0
 sBK4         DB " ESC ", 0
 sBN0         DB " Reset ", 0
-sBN1         DB " Save report ", 0
+sBN1         DB " Save ", 0
 sBN2         DB " Pause ", 0
 sBN2R        DB " Resume ", 0
 sBN3         DB " Autosave off ", 0
 sBN3On       DB " Autosave on ", 0
 sBN4         DB " Quit ", 0
-btnKeys      DD OFFSET sBK0, OFFSET sBK1, OFFSET sBK2, OFFSET sBK3, OFFSET sBK4
-btnNames     DD OFFSET sBN0, OFFSET sBN1, OFFSET sBN2, OFFSET sBN3, OFFSET sBN4
-btnColors    DD C_BLUE, C_BLUE, C_BLUE, C_BLUE, C_RED
-btnAction    DB 0, 1, 2, 4, 3
+sBK5         DB " F5 ", 0
+sBN5         DB " Test ", 0
+sBN5B        DB " Back ", 0
+btnKeys      DD OFFSET sBK0, OFFSET sBK1, OFFSET sBK2, OFFSET sBK3, OFFSET sBK5, OFFSET sBK4
+btnNames     DD OFFSET sBN0, OFFSET sBN1, OFFSET sBN2, OFFSET sBN3, OFFSET sBN5, OFFSET sBN4
+btnColors    DD C_BLUE, C_BLUE, C_BLUE, C_BLUE, C_PURP2, C_RED
+btnAction    DB 0, 1, 2, 4, 5, 3
 sHint        DB "Mouse: click the buttons  ", 0FAh, "  <- -> or wheel: resize N  ", 0FAh
-             DB "  keys are counted only while LIVE", 0
+             DB "  F5: typing test", 0
 sMsgReset    DB 0FBh, " Counters reset", 0
-sMsgSaved    DB 0FBh, " Report saved to KeyReport.txt", 0
-sMsgFail     DB "x Could not write KeyReport.txt", 0
+sMsgSaved    DB 0FBh, " Saved KeyReport.txt and KeyReport.html", 0
+sMsgFail     DB "x Could not write the report files", 0
+sMsgTest     DB 0FBh, " Typing test - start typing (F5 = back)", 0
+sMsgDash     DB 0FBh, " Dashboard", 0
+sMsgWelcome  DB 0FBh, " Welcome back - last session loaded (see VS LAST)", 0
 sMsgPause    DB "|| Paused - typing is not counted", 0
 sMsgResume   DB 0FBh, " Live again", 0
 sReportFile  DB "KeyReport.txt", 0
+sHtmlFile    DB "KeyReport.html", 0
+sStatsFile   DB "KeyStats.dat", 0
+sNoBrowser   DB "KPM_NO_BROWSER", 0          ; set it to stop F2 opening the browser
+sOpenCmd     DB 'cmd.exe /c start "" "KeyReport.html"', 0
 sSPC         DB "SPC", 0
 sENT         DB "ENT", 0
 sTAB         DB "TAB", 0
@@ -363,6 +445,148 @@ vtFrameEnd   DB 27, "[?2026l", 0
 vtClear      DB 27, "[48;2;11;14;26m", 27, "[2J", 0 ; fill the window with the page colour
 vtReset      DB 27, "[0m", 27, "[2J", 27, "[H", 27, "[?25h", 0
 
+; ---- typing test sentences and text ----
+sent0        DB "the quick brown fox jumps over the lazy dog", 0
+sent1        DB "assembly language gives you full control of the machine", 0
+sent2        DB "pack my box with five dozen liquor jugs", 0
+sent3        DB "every keystroke is counted, classified and drawn in real time", 0
+sent4        DB "interrupts, registers and memory are the heart of a computer", 0
+sent5        DB "sphinx of black quartz, judge my vow", 0
+sentences    DD OFFSET sent0, OFFSET sent1, OFFSET sent2, OFFSET sent3, OFFSET sent4, OFFSET sent5
+sCardTW      DB " SPEED ", 0FAh, " WPM ", 0
+sCardAcc     DB " ACCURACY % ", 0
+sCardErr     DB " ERRORS ", 0
+sCardTime    DB " TIME  s ", 0
+sBestSess    DB "best ", 0
+sAllTime     DB "  all-time ", 0
+sPctCorrect  DB "keys typed right", 0
+sErrSub      DB "wrong keys typed", 0
+sSecSub      DB "seconds", 0
+sBoxTest     DB " TYPING TEST  ", 0FAh, "  type this sentence ", 0
+sSentence    DB " sentence ", 0
+sOfSix       DB " of 6 ", 0
+sBoxResult   DB " RESULT ", 0
+sHow1        DB "Type the sentence above. The timer starts with your first key.", 0
+sHow2        DB "Green = correct   Red = mistake   Backspace = fix it   Enter = next sentence", 0
+sHow3        DB "Every key typed here also counts on the dashboard.   F5 = back to the dashboard.", 0
+sGoing       DB "Keep going ", 0FAh, " ", 0
+sChars       DB " characters", 0
+sWpmWord     DB "WPM", 0
+sResAcc      DB "ACCURACY   ", 0
+sResErr      DB "ERRORS     ", 0
+sResTime     DB "TIME       ", 0
+sResBest     DB "BEST       ", 0
+sResAll      DB "   ALL-TIME ", 0
+sNewBest     DB " NEW PERSONAL BEST! ", 0
+sAgain       DB "Press Enter for the next sentence  ", 0FAh, "  F5 = back to the dashboard", 0
+
+; ---- last-session comparison ----
+sVsLast      DB "VS LAST  ", 0
+sFirstRun    DB "first session - saved on exit", 0
+sCmpAvg      DB "avg ", 0
+sCmpPeak     DB "  peak ", 0
+sCmpBest     DB "  best ", 0
+
+; ---- HTML report pieces ----
+hexDigits    DB "0123456789abcdef"
+hEscLt       DB "&lt;", 0
+hEscGt       DB "&gt;", 0
+hEscAmp      DB "&amp;", 0
+hEscQuot     DB "&quot;", 0
+hHead        DB '<!doctype html><html lang="en"><head><meta charset="utf-8">', 13, 10
+             DB '<meta name="viewport" content="width=device-width,initial-scale=1">', 13, 10
+             DB '<title>Key Press Monitor - report</title><style>', 13, 10
+             DB 'body{background:#0b0e1a;color:#e2e8f0;font:15px/1.5 "Segoe UI",system-ui,sans-serif;margin:0;padding:32px}', 13, 10
+             DB '.wrap{max-width:1100px;margin:auto}h1{margin:0;font-size:28px;font-weight:600}', 13, 10
+             DB '.sub{color:#64748b;margin:2px 0 22px}.lbl{color:#64748b;font-size:12px;letter-spacing:.08em;text-transform:uppercase}', 13, 10
+             DB '.grid{display:grid;grid-template-columns:repeat(4,1fr);gap:14px;margin-bottom:14px}', 13, 10
+             DB '.row{display:grid;grid-template-columns:1fr 1fr;gap:14px;margin-bottom:14px}', 13, 10
+             DB '.card{background:#121729;border:1px solid #2a3352;border-radius:14px;padding:16px 18px}', 13, 10
+             DB '.card b{display:block;font-size:34px;font-weight:600;line-height:1.2}', 13, 10
+             DB '.bars{display:flex;align-items:flex-end;gap:5px;height:180px;margin-top:10px}', 13, 10
+             DB '.bar{flex:1;display:flex;flex-direction:column;justify-content:flex-end;align-items:center;font-size:11px;color:#94a3b8}', 13, 10
+             DB '.bar i{display:block;width:100%;border-radius:4px 4px 0 0;margin:3px 0}', 13, 10
+             DB '.kb>div{display:flex;gap:5px;margin:6px 0}', 13, 10
+             DB '.kb span{min-width:32px;height:32px;border-radius:7px;display:flex;align-items:center;justify-content:center;font-weight:600}', 13, 10
+             DB 'table{width:100%;border-collapse:collapse;margin-top:8px}td,th{padding:5px 8px;text-align:left}', 13, 10
+             DB 'th{color:#64748b;font-weight:500;font-size:12px}td.n{color:#94a3b8;text-align:right}', 13, 10
+             DB '.up{color:#4ade80}.down{color:#f43f5e}.same{color:#64748b}', 13, 10
+             DB '.freq{display:flex;flex-wrap:wrap;gap:6px;margin-top:10px}', 13, 10
+             DB '.freq span{background:#1c2238;border-radius:6px;padding:2px 9px;font-family:Consolas,monospace}.freq b{display:inline;font-size:inherit;color:#67e8f9}', 13, 10
+             DB 'footer{color:#64748b;margin-top:22px;font-size:12px}', 13, 10
+             DB '@media(max-width:800px){.grid{grid-template-columns:1fr 1fr}.row{grid-template-columns:1fr}}', 13, 10
+             DB '</style></head><body><div class="wrap"><h1>Key Press Monitor</h1><div class="sub">Session report &middot; ', 0
+hDot         DB " &middot; ", 0
+hSubEnd      DB ' of typing</div><div class="grid">', 13, 10, 0
+hCard1       DB '<div class="card"><div class="lbl">', 0
+hCard2       DB '</div><b style="color:', 0
+hCard3       DB '">', 0
+hCard4       DB '</b><div class="lbl">', 0
+hCardEnd     DB '</div></div>', 13, 10, 0
+hGridNext    DB '</div><div class="grid">', 13, 10, 0
+hGridEnd     DB '</div>', 13, 10, 0
+hlTotal      DB "Total keys", 0
+hlKeysSess   DB "keys this session", 0
+hlVowels     DB "Vowels", 0
+hlPctLetters DB "% of letters", 0
+hlCons       DB "Consonants", 0
+hlAvg        DB "Average WPM", 0
+hlPeak       DB "peak ", 0
+hlPeakW      DB "Peak WPM", 0
+hlWords      DB "Words", 0
+hlLongest    DB "longest word ", 0
+hlBs         DB "Backspaces", 0
+hlCorr       DB "% correction rate", 0
+hlSpaces     DB "Spaces", 0
+hlDigits     DB "digits ", 0
+hlSymbols    DB ", symbols ", 0
+hlTest       DB "Typing test best WPM", 0
+hlAllTime    DB "all-time best ", 0
+hCmpHead     DB '<div class="card" style="margin-bottom:14px"><div class="lbl">Compared with the last session</div>'
+             DB '<table><tr><th></th><th>This session</th><th>Last session</th><th>Change</th></tr>', 13, 10, 0
+hCmpEnd      DB '</table></div>', 13, 10, 0
+hTrTd        DB '<tr><td>', 0
+hTdTd        DB '</td><td>', 0
+hTdNum       DB '</td><td class="n">', 0
+hTdTrEnd     DB '</td></tr>', 13, 10, 0
+hTdUp        DB '</td><td class="up">&#9650; ', 0
+hTdDown      DB '</td><td class="down">&#9660; ', 0
+hTdSame      DB '</td><td class="same">=', 0
+hBarsHead    DB '<div class="row"><div class="card"><div class="lbl">Letter frequency A-Z</div><div class="bars">', 13, 10, 0
+hBar1        DB '<div class="bar">', 0
+hBar2        DB '<i style="height:', 0
+hBar3        DB 'px;background:', 0
+hBar4        DB '"></i>', 0
+hBar5        DB '</div>', 0
+hKbHead      DB '</div></div><div class="card"><div class="lbl">Keyboard heatmap</div><div class="kb">', 13, 10, 0
+hKbRow       DB '<div style="margin-left:', 0
+hKbRow2      DB 'px">', 0
+hKey1        DB '<span style="background:', 0
+hKey2        DB ';color:', 0
+hKey3        DB '">', 0
+hKey4        DB '</span>', 0
+hDivEnd      DB '</div>', 13, 10, 0
+hSpace1      DB '<div style="margin-left:78px"><span style="width:220px;background:', 0
+hSpace2      DB '">SPACE</span></div></div></div></div>', 13, 10, 0
+hWpmHead     DB '<div class="row"><div class="card"><div class="lbl">WPM history, last 52 s</div>'
+             DB '<svg viewBox="0 0 520 125" width="100%" style="margin-top:10px">'
+             DB '<line x1="0" y1="120" x2="520" y2="120" stroke="#2a3352"/>', 13, 10, 0
+hPoly1       DB '<polygon fill="#7c3aed" fill-opacity="0.3" points="', 0
+hBase        DB ",120 ", 0
+hBaseEnd     DB ',120"/>', 0
+hPoly2       DB '<polyline fill="none" stroke="#c4b5fd" stroke-width="2.5" stroke-linejoin="round" points="', 0
+hPolyEnd     DB '"/>', 0
+hWpmEnd      DB '</svg></div>', 13, 10, 0
+hTopHead     DB '<div class="card"><div class="lbl">Top 5</div><table><tr><th>#</th><th>Key</th><th></th>'
+             DB '<th>Bigram</th><th></th><th>Trigram</th><th></th></tr>', 13, 10, 0
+hTopEnd      DB '</table></div></div>', 13, 10, 0
+hFreqHead    DB '<div class="card"><div class="lbl">Every key pressed</div><div class="freq">', 13, 10, 0
+hFreq1       DB '<span>', 0
+hFreq2       DB ' <b>', 0
+hFreq3       DB '</b></span>', 0
+hFoot        DB '</div></div><footer>Generated by KeyMonitor.asm &middot; MASM x86 &middot; kernel32 only</footer>'
+             DB '</div></body></html>', 13, 10, 0
+
 ; ---- report text (saved with F2 and printed on exit) ----
 rpTitle      DB 13, 10, "========== KEY PRESS MONITOR - REPORT ==========", 13, 10, 0
 rpTotal      DB "Total keys       : ", 0
@@ -378,6 +602,9 @@ rpBs         DB "Backspaces       : ", 0
 rpErr        DB "Correction rate %: ", 0
 rpPeak       DB "Peak WPM         : ", 0
 rpAvg        DB "Average WPM      : ", 0
+rpTest       DB "Typing test best : ", 0
+rpLastAvg    DB "Last session avg : ", 0
+rpLastPeak   DB "Last session peak: ", 0
 rpTime       DB "Session time     : ", 0
 rpLast       DB "Last N chars     : [", 0
 rpLastEnd    DB "]", 13, 10, 0
@@ -400,6 +627,7 @@ legacyBuf    DD SCR_W * SCR_H DUP(?)   ; CHAR_INFO cells for the 16-colour fallb
 csbiOld      DB 96 DUP(?)              ; CONSOLE_SCREEN_BUFFER_INFOEX
 csbiNew      DB 96 DUP(?)
 rptBuf       DB 16384 DUP(?)
+htmlBuf      DB 65536 DUP(?)          ; KeyReport.html
 bigrams      DD NG2 DUP(?)            ; count of every letter pair
 trigrams     DD NG3 DUP(?)            ; count of every letter triple
 
@@ -1127,6 +1355,7 @@ CountChar PROC USES ebx kc:DWORD, vk:DWORD
     mov  eax, vk
     and  eax, 0FFh
     inc  vkFreq[eax*4]
+    mov  rippleVk, eax
     mov  lastKeyCode, ebx
     cmp  ebx, 8                     ; Backspace = a correction
     jne  cc_nobs
@@ -1223,6 +1452,7 @@ cc_push:                            ; requirement (c): circular buffer
 
 cc_time:                            ; remember when the key was pressed
     invoke GetTickCount
+    mov  rippleTick, eax
     mov  ecx, tsHead
     mov  tsRing[ecx*4], eax
     inc  ecx
@@ -1453,6 +1683,209 @@ ng_loop:
 NgramName ENDP
 
 ; =============================================================
+;  Typing test and last-session statistics
+; =============================================================
+
+; ---- start the next sentence of the typing test ----
+NewTest PROC
+    mov  eax, testIdx
+    inc  eax
+    cmp  eax, NSENT
+    jb   nt_idx
+    xor  eax, eax
+nt_idx:
+    mov  testIdx, eax
+    mov  eax, sentences[eax*4]
+    mov  testPtr, eax
+    invoke StrLen, eax
+    mov  testLen, eax
+    xor  eax, eax
+    mov  testPos, eax
+    mov  testKeys, eax
+    mov  testErrors, eax
+    mov  testStart, eax
+    mov  testEnd, eax
+    mov  testDone, eax
+    mov  testNewBest, eax
+    ret
+NewTest ENDP
+
+; ---- live (or final) test numbers: tWpm, tAcc, tSec ----
+TestLive PROC USES ebx esi edi
+    xor  eax, eax
+    mov  tWpm, eax
+    mov  tSec, eax
+    mov  tAcc, 100
+    cmp  testStart, 0
+    je   tl_done
+    mov  eax, nowTick
+    cmp  testDone, 0
+    je   tl_t
+    mov  eax, testEnd
+tl_t:
+    sub  eax, testStart
+    jnz  tl_ms
+    inc  eax
+tl_ms:
+    mov  ebx, eax                   ; ebx = milliseconds
+    xor  edx, edx
+    mov  ecx, 1000
+    div  ecx
+    mov  tSec, eax
+    xor  ecx, ecx                   ; correct characters so far
+    xor  esi, esi
+    mov  edi, testPtr
+tl_cnt:
+    cmp  esi, testPos
+    jae  tl_wpm
+    mov  al, testTyped[esi]
+    cmp  al, [edi+esi]
+    jne  tl_next
+    inc  ecx
+tl_next:
+    inc  esi
+    jmp  tl_cnt
+tl_wpm:
+    mov  eax, ecx                   ; WPM = (correct chars / 5) per minute
+    mov  edx, 12000
+    mul  edx
+    div  ebx
+    mov  tWpm, eax
+    mov  ecx, testKeys              ; accuracy = keys typed right / keys typed
+    test ecx, ecx
+    jz   tl_done
+    mov  eax, ecx
+    sub  eax, testErrors
+    mov  edx, 100
+    mul  edx
+    div  ecx
+    mov  tAcc, eax
+tl_done:
+    ret
+TestLive ENDP
+
+; ---- one typed character while the typing test is on screen ----
+TestKey PROC USES ebx kc:DWORD
+    mov  eax, kc
+    cmp  testDone, 0
+    je   tk_live
+    cmp  eax, 13                    ; finished: Enter starts the next sentence
+    jne  tk_done
+    invoke NewTest
+    ret
+tk_live:
+    cmp  eax, 8                     ; Backspace steps back to fix a mistake
+    jne  tk_char
+    cmp  testPos, 0
+    je   tk_done
+    dec  testPos
+    ret
+tk_char:
+    cmp  eax, 32
+    jb   tk_done
+    cmp  eax, 126
+    ja   tk_done
+    cmp  testStart, 0               ; the timer starts on the first key
+    jne  tk_store
+    push eax
+    invoke GetTickCount
+    mov  testStart, eax
+    pop  eax
+tk_store:
+    mov  ebx, testPos
+    mov  testTyped[ebx], al
+    inc  testKeys
+    mov  edx, testPtr
+    cmp  al, [edx+ebx]
+    je   tk_ok
+    inc  testErrors
+tk_ok:
+    inc  ebx
+    mov  testPos, ebx
+    cmp  ebx, testLen
+    jb   tk_done
+    invoke GetTickCount             ; sentence finished
+    mov  testEnd, eax
+    mov  testDone, 1
+    invoke TestLive
+    mov  eax, tWpm
+    cmp  eax, testBest
+    jbe  tk_all
+    mov  testBest, eax
+tk_all:
+    cmp  eax, bestTestAll
+    jbe  tk_done
+    mov  bestTestAll, eax
+    mov  testNewBest, 1
+tk_done:
+    ret
+TestKey ENDP
+
+; ---- read the previous session from KeyStats.dat (if there is one) ----
+LoadStats PROC USES ebx
+    invoke CreateFileA, ADDR sStatsFile, 80000000h, 1, 0, 3, 80h, 0   ; read, OPEN_EXISTING
+    cmp  eax, -1
+    je   ls_done
+    mov  ebx, eax
+    invoke ReadFile, ebx, ADDR lastStats, STAT_N * 4, ADDR nRead, 0
+    invoke CloseHandle, ebx
+    cmp  nRead, STAT_N * 4
+    jne  ls_done
+    cmp  lastStats, STAT_MAGIC
+    jne  ls_done
+    mov  hasLast, 1
+    mov  eax, lastStats[ST_BEST*4]
+    mov  bestPeakAll, eax
+    mov  eax, lastStats[ST_TBEST*4]
+    mov  bestTestAll, eax
+ls_done:
+    ret
+LoadStats ENDP
+
+; ---- write this session to KeyStats.dat (kept if nothing was typed) ----
+SaveStats PROC USES ebx
+    cmp  totalKeys, 0
+    je   sv_done
+    invoke UpdateStats
+    mov  statBuf, STAT_MAGIC
+    mov  eax, totalKeys
+    mov  statBuf[ST_TOTAL*4], eax
+    mov  eax, vowels
+    mov  statBuf[ST_VOW*4], eax
+    mov  eax, consonants
+    mov  statBuf[ST_CON*4], eax
+    mov  eax, words
+    mov  statBuf[ST_WORDS*4], eax
+    mov  eax, wpmPeak
+    mov  statBuf[ST_PEAK*4], eax
+    mov  eax, wpmAvg
+    mov  statBuf[ST_AVG*4], eax
+    mov  eax, elapsedSec
+    mov  statBuf[ST_TIME*4], eax
+    mov  eax, bsCount
+    mov  statBuf[ST_BS*4], eax
+    mov  eax, wpmPeak               ; all-time best peak WPM
+    cmp  eax, bestPeakAll
+    jae  sv_best
+    mov  eax, bestPeakAll
+sv_best:
+    mov  statBuf[ST_BEST*4], eax
+    mov  eax, bestTestAll
+    mov  statBuf[ST_TBEST*4], eax
+    mov  eax, lastStats[ST_SESS*4]
+    inc  eax
+    mov  statBuf[ST_SESS*4], eax
+    invoke CreateFileA, ADDR sStatsFile, 40000000h, 0, 0, 2, 80h, 0   ; write, CREATE_ALWAYS
+    cmp  eax, -1
+    je   sv_done
+    mov  ebx, eax
+    invoke WriteFile, ebx, ADDR statBuf, STAT_N * 4, ADDR nWritten, 0
+    invoke CloseHandle, ebx
+sv_done:
+    ret
+SaveStats ENDP
+
+; =============================================================
 ;  Dashboard sections
 ; =============================================================
 
@@ -1510,18 +1943,21 @@ Card ENDP
 DrawCards PROC USES ebx
     mov  ebx, vowels
     add  ebx, consonants            ; ebx = letters typed
+    invoke Tween, ADDR dispV, vowels
+    invoke Tween, ADDR dispC, consonants
+    invoke Tween, ADDR dispT, totalKeys
 
-    invoke Card, 2, ADDR sCardV, vowels, C_GREEN, C_GREEN2, ADDR cardV, CARD_MASK, cardHead, cardCount
+    invoke Card, 2, ADDR sCardV, dispV, C_GREEN, C_GREEN2, ADDR cardV, CARD_MASK, cardHead, cardCount
     invoke Percent, vowels, ebx
     invoke Num, 4, 6, eax, C_GREEN
     invoke Text, eax, 6, ADDR sPctLetters, C_MUTED, C_KEEP
 
-    invoke Card, 26, ADDR sCardC, consonants, C_AMBER, C_AMBER2, ADDR cardC, CARD_MASK, cardHead, cardCount
+    invoke Card, 26, ADDR sCardC, dispC, C_AMBER, C_AMBER2, ADDR cardC, CARD_MASK, cardHead, cardCount
     invoke Percent, consonants, ebx
     invoke Num, 28, 6, eax, C_AMBER
     invoke Text, eax, 6, ADDR sPctLetters, C_MUTED, C_KEEP
 
-    invoke Card, 50, ADDR sCardT, totalKeys, C_CYAN, C_CYAN2, ADDR cardT, CARD_MASK, cardHead, cardCount
+    invoke Card, 50, ADDR sCardT, dispT, C_CYAN, C_CYAN2, ADDR cardT, CARD_MASK, cardHead, cardCount
     invoke Text, 52, 6, ADDR sKeysSession, C_MUTED, C_KEEP
 
     invoke Card, 74, ADDR sCardW, wpmNow, C_PURP, C_PURP2, ADDR wpmHist, HIST_SIZE - 1, histHead, histCount
@@ -1808,6 +2244,10 @@ HeatText ENDP
 Keycap PROC USES ebx px:DWORD, py:DWORD, lbl:DWORD, cnt:DWORD
     invoke HeatColor, cnt
     mov  ebx, eax
+    mov  ecx, px                    ; ripple from the last key pressed
+    inc  ecx
+    invoke RippleMix, ecx, py, ebx
+    mov  ebx, eax
     invoke Cell, px, py, 2590h, ebx, C_PANEL
     invoke HeatText, cnt
     mov  ecx, px
@@ -1823,6 +2263,7 @@ Keycap ENDP
 DrawHeatmap PROC USES ebx esi edi
     LOCAL rowI:DWORD, kx:DWORD, ky:DWORD, pVk:DWORD
     invoke RBox, 59, 12, 39, 7, ADDR sBoxHeat, C_BORDER, C_TEXT
+    invoke RippleSetup
 
     mov  heatMax, 1
     xor  ecx, ecx
@@ -1865,6 +2306,7 @@ hm_nextrow:
     jb   hm_row
 
     invoke HeatColor, vkFreq[20h*4] ; space bar
+    invoke RippleMix, 74, 17, eax
     mov  ebx, eax
     invoke HeatText, vkFreq[20h*4]
     mov  esi, eax
@@ -2066,6 +2508,7 @@ DrawStatsLine PROC USES ebx
     invoke Percent, bsCount, totalKeys
     invoke Num, ebx, 27, eax, C_AMBER
     invoke Cell, eax, 27, '%', C_AMBER, C_KEEP
+    invoke DrawCompare
     ret
 DrawStatsLine ENDP
 
@@ -2090,11 +2533,18 @@ bt_loop:
     jmp  bt_size
 bt_auto:
     cmp  esi, 3                     ; autosave button when on
-    jne  bt_size
+    jne  bt_view
     cmp  autoSave, 0
     je   bt_size
     mov  pName, OFFSET sBN3On
     mov  col, C_GREEN2
+    jmp  bt_size
+bt_view:
+    cmp  esi, 4                     ; typing test button while the test is shown
+    jne  bt_size
+    cmp  viewMode, 0
+    je   bt_size
+    mov  pName, OFFSET sBN5B
 bt_size:
     invoke StrLen, btnKeys[esi*4]   ; width = edges + key + name
     mov  edi, eax
@@ -2142,11 +2592,317 @@ bt_hint:
     ret
 DrawButtons ENDP
 
+; ---- move a shown number one step towards its real value (count-up) ----
+Tween PROC USES ebx pDisp:DWORD, actual:DWORD
+    mov  ebx, pDisp
+    mov  eax, actual
+    sub  eax, [ebx]
+    jbe  tw_set                     ; going down (reset) or equal: jump there
+    add  eax, 2                     ; step = ceil(gap / 3)
+    xor  edx, edx
+    mov  ecx, 3
+    div  ecx
+    add  [ebx], eax
+    mov  animating, 1
+    ret
+tw_set:
+    mov  eax, actual
+    mov  [ebx], eax
+    ret
+Tween ENDP
+
+; ---- find the heatmap position of the last key pressed (ripple centre) ----
+RippleSetup PROC USES ebx esi edi
+    mov  rippleOn, 0
+    cmp  rippleVk, -1
+    je   ri_done
+    mov  eax, nowTick
+    sub  eax, rippleTick
+    cmp  eax, RIPPLE_MS
+    jae  ri_done
+    mov  rippleAge, eax
+    mov  eax, rippleVk
+    cmp  eax, 20h                   ; space bar
+    jne  ri_rows
+    mov  rippleX, 74
+    mov  rippleY, 17
+    jmp  ri_on
+ri_rows:
+    xor  ecx, ecx                   ; ecx = keyboard row
+ri_row:
+    cmp  ecx, 4
+    jae  ri_done
+    mov  ebx, ecx
+    shl  ebx, 4
+    add  ebx, OFFSET kbRows
+    mov  esi, [ebx]                 ; labels
+    mov  edi, [ebx+4]               ; virtual key codes
+    xor  edx, edx
+ri_key:
+    cmp  BYTE PTR [esi+edx], 0
+    je   ri_nextrow
+    cmp  [edi+edx], al
+    je   ri_found
+    inc  edx
+    jmp  ri_key
+ri_nextrow:
+    inc  ecx
+    jmp  ri_row
+ri_found:
+    lea  edx, [edx+edx*2]           ; label column = x + 3*index + 1
+    add  edx, [ebx+8]
+    inc  edx
+    mov  rippleX, edx
+    mov  eax, [ebx+12]
+    mov  rippleY, eax
+ri_on:
+    mov  rippleOn, 1
+    mov  animating, 1
+ri_done:
+    ret
+RippleSetup ENDP
+
+; ---- key colour during a ripple: white flash on the key, a ring spreading out ----
+RippleMix PROC px:DWORD, py:DWORD, clr:DWORD
+    mov  eax, clr
+    cmp  rippleOn, 0
+    je   rm_done
+    mov  eax, px                    ; distance in keys: |dx| / 3 + |dy|
+    sub  eax, rippleX
+    cdq
+    xor  eax, edx
+    sub  eax, edx
+    inc  eax
+    xor  edx, edx
+    mov  ecx, 3
+    div  ecx
+    mov  ecx, eax
+    mov  eax, py
+    sub  eax, rippleY
+    cdq
+    xor  eax, edx
+    sub  eax, edx
+    add  ecx, eax
+    test ecx, ecx
+    jnz  rm_ring
+    invoke Lerp, C_WHITE, clr, rippleAge, RIPPLE_MS     ; the pressed key
+    ret
+rm_ring:
+    push ecx
+    mov  eax, rippleAge             ; ring radius grows with age
+    xor  edx, edx
+    mov  ecx, RIPPLE_STEP
+    div  ecx
+    pop  ecx
+    cmp  eax, ecx
+    jne  rm_keep
+    mov  eax, RIPPLE_MS             ; fainter as it spreads
+    sub  eax, rippleAge
+    invoke Lerp, clr, C_WHITE, eax, RIPPLE_MS * 2
+    ret
+rm_keep:
+    mov  eax, clr
+rm_done:
+    ret
+RippleMix ENDP
+
+; ---- arrow and difference (green up, red down); returns eax = next x ----
+Delta PROC USES ebx px:DWORD, py:DWORD, cur:DWORD, prev:DWORD
+    mov  eax, cur
+    sub  eax, prev
+    jz   de_same
+    js   de_down
+    mov  ebx, eax
+    invoke Cell, px, py, 25B2h, C_OK, C_KEEP
+    mov  eax, px
+    inc  eax
+    invoke Num, eax, py, ebx, C_OK
+    ret
+de_down:
+    neg  eax
+    mov  ebx, eax
+    invoke Cell, px, py, 25BCh, C_RED, C_KEEP
+    mov  eax, px
+    inc  eax
+    invoke Num, eax, py, ebx, C_RED
+    ret
+de_same:
+    invoke Cell, px, py, '=', C_MUTED, C_KEEP
+    mov  eax, px
+    inc  eax
+    ret
+Delta ENDP
+
+; ---- this session against the last one (right half of the stats line) ----
+DrawCompare PROC USES ebx
+    invoke Text, 59, 27, ADDR sVsLast, C_MUTED, C_KEEP
+    cmp  hasLast, 0
+    jne  dcm_have
+    invoke Text, eax, 27, ADDR sFirstRun, C_DIM, C_KEEP
+    ret
+dcm_have:
+    invoke Text, eax, 27, ADDR sCmpAvg, C_MUTED, C_KEEP
+    invoke Delta, eax, 27, wpmAvg, lastStats[ST_AVG*4]
+    invoke Text, eax, 27, ADDR sCmpPeak, C_MUTED, C_KEEP
+    invoke Delta, eax, 27, wpmPeak, lastStats[ST_PEAK*4]
+    invoke Text, eax, 27, ADDR sCmpBest, C_MUTED, C_KEEP
+    mov  ebx, eax
+    mov  eax, wpmPeak
+    cmp  eax, bestPeakAll
+    jae  dcm_best
+    mov  eax, bestPeakAll
+dcm_best:
+    invoke Num, ebx, 27, eax, C_GOLD
+    ret
+DrawCompare ENDP
+
+; ---- typing test screen (F5): cards, the sentence, progress, result ----
+DrawTestView PROC USES ebx esi edi
+    LOCAL x0:DWORD
+    invoke TestLive
+    invoke Card, 2, ADDR sCardTW, tWpm, C_PURP, C_PURP2, 0, 0, 0, 0
+    invoke Text, 4, 6, ADDR sBestSess, C_MUTED, C_KEEP
+    invoke Num, eax, 6, testBest, C_WHITE
+    invoke Text, eax, 6, ADDR sAllTime, C_MUTED, C_KEEP
+    invoke Num, eax, 6, bestTestAll, C_GOLD
+    invoke Card, 26, ADDR sCardAcc, tAcc, C_GREEN, C_GREEN2, 0, 0, 0, 0
+    invoke Text, 28, 6, ADDR sPctCorrect, C_MUTED, C_KEEP
+    invoke Card, 50, ADDR sCardErr, testErrors, C_AMBER, C_AMBER2, 0, 0, 0, 0
+    invoke Text, 52, 6, ADDR sErrSub, C_MUTED, C_KEEP
+    invoke Card, 74, ADDR sCardTime, tSec, C_CYAN, C_CYAN2, 0, 0, 0, 0
+    invoke Text, 76, 6, ADDR sSecSub, C_MUTED, C_KEEP
+
+    ; ---- the sentence: green = right, red = wrong, cyan = next ----
+    invoke RBox, 2, 9, 96, 7, ADDR sBoxTest, C_BORDER, C_TEXT
+    invoke Text, 79, 9, ADDR sSentence, C_MUTED, C_KEEP
+    mov  ebx, eax
+    mov  eax, testIdx
+    inc  eax
+    invoke Num, ebx, 9, eax, C_TEXT
+    invoke Text, eax, 9, ADDR sOfSix, C_MUTED, C_KEEP
+    mov  eax, 92
+    sub  eax, testLen
+    shr  eax, 1
+    add  eax, 4
+    mov  x0, eax
+    xor  esi, esi
+tv_ch:
+    cmp  esi, testLen
+    jae  tv_bar
+    mov  edx, testPtr
+    movzx edi, BYTE PTR [edx+esi]   ; target character
+    mov  ecx, x0
+    add  ecx, esi
+    cmp  esi, testPos
+    jae  tv_rest
+    mov  al, testTyped[esi]
+    cmp  al, [edx+esi]
+    jne  tv_wrong
+    invoke Cell, ecx, 11, edi, C_GREEN, C_KEEP
+    jmp  tv_next
+tv_wrong:
+    cmp  edi, ' '                   ; a missed space shows as a dot
+    jne  tv_w2
+    mov  edi, 00B7h
+tv_w2:
+    invoke Cell, ecx, 11, edi, C_WHITE, C_RED
+    jmp  tv_next
+tv_rest:
+    jne  tv_todo
+    cmp  testDone, 0
+    jne  tv_todo
+    invoke Cell, ecx, 11, edi, C_PAGE, C_CYAN
+    jmp  tv_next
+tv_todo:
+    invoke Cell, ecx, 11, edi, C_TEXT, C_KEEP
+tv_next:
+    inc  esi
+    jmp  tv_ch
+
+tv_bar:                             ; progress bar, columns 6-85
+    mov  eax, testPos
+    mov  edx, 80
+    mul  edx
+    div  testLen
+    mov  ebx, eax
+    xor  esi, esi
+tv_pb:
+    cmp  esi, 80
+    jae  tv_pct
+    lea  ecx, [esi+6]
+    cmp  esi, ebx
+    jae  tv_pe
+    push ecx
+    invoke Lerp, C_CYAN2, C_CYAN, esi, 79
+    pop  ecx
+    invoke Cell, ecx, 13, 2584h, eax, C_KEEP
+    jmp  tv_pn
+tv_pe:
+    invoke Cell, ecx, 13, 2584h, C_TRACK, C_KEEP
+tv_pn:
+    inc  esi
+    jmp  tv_pb
+tv_pct:
+    mov  eax, testPos
+    mov  edx, 100
+    mul  edx
+    div  testLen
+    invoke Num, 88, 13, eax, C_CYAN
+    invoke Cell, eax, 13, '%', C_CYAN, C_KEEP
+
+    ; ---- instructions while typing, result when finished ----
+    invoke RBox, 2, 17, 96, 10, ADDR sBoxResult, C_BORDER, C_TEXT
+    cmp  testDone, 0
+    jne  tv_res
+    cmp  testPos, 0
+    jne  tv_going
+    invoke Text, 5, 19, ADDR sHow1, C_TEXT, C_KEEP
+    invoke Text, 5, 21, ADDR sHow2, C_MUTED, C_KEEP
+    invoke Text, 5, 23, ADDR sHow3, C_MUTED, C_KEEP
+    ret
+tv_going:
+    invoke Text, 5, 19, ADDR sGoing, C_TEXT, C_KEEP
+    invoke Num, eax, 19, testPos, C_CYAN
+    mov  ebx, eax
+    invoke Cell, ebx, 19, '/', C_MUTED, C_KEEP
+    lea  eax, [ebx+1]
+    invoke Num, eax, 19, testLen, C_TEXT
+    invoke Text, eax, 19, ADDR sChars, C_MUTED, C_KEEP
+    invoke Text, 5, 21, ADDR sHow2, C_MUTED, C_KEEP
+    ret
+tv_res:
+    invoke BigNum, 5, 19, tWpm, C_PURP, C_PURP2
+    invoke NumToStr, tWpm
+    lea  eax, [ecx*4+5]
+    invoke Text, eax, 21, ADDR sWpmWord, C_PURP, C_KEEP
+    invoke Text, 26, 19, ADDR sResAcc, C_MUTED, C_KEEP
+    invoke Num, eax, 19, tAcc, C_GREEN
+    invoke Cell, eax, 19, '%', C_GREEN, C_KEEP
+    invoke Text, 26, 20, ADDR sResErr, C_MUTED, C_KEEP
+    invoke Num, eax, 20, testErrors, C_AMBER
+    invoke Text, 26, 21, ADDR sResTime, C_MUTED, C_KEEP
+    invoke TimeMS, eax, 21, tSec, C_CYAN
+    invoke Text, 26, 22, ADDR sResBest, C_MUTED, C_KEEP
+    invoke Num, eax, 22, testBest, C_WHITE
+    invoke Text, eax, 22, ADDR sResAll, C_MUTED, C_KEEP
+    invoke Num, eax, 22, bestTestAll, C_GOLD
+    cmp  testNewBest, 0
+    je   tv_again
+    inc  eax
+    invoke Text, eax, 22, ADDR sNewBest, C_GOLD, C_KEEP
+tv_again:
+    invoke Text, 5, 25, ADDR sAgain, C_MUTED, C_KEEP
+    ret
+DrawTestView ENDP
+
 ; ---- redraw every panel into the canvas, then flush once ----
 RenderAll PROC
+    mov  animating, 0
     invoke UpdateStats
     invoke Fill, 0, 0, SCR_W, SCR_H, ' ', C_TEXT, C_PAGE
     invoke DrawHeader
+    cmp  viewMode, 0
+    jne  ra_test
     invoke DrawCards
     invoke DrawChips
     invoke DrawLastN
@@ -2154,9 +2910,18 @@ RenderAll PROC
     invoke DrawHeatmap
     invoke DrawRanks
     invoke DrawWpmHistory
+    jmp  ra_bottom
+ra_test:
+    invoke DrawTestView
+ra_bottom:
     invoke DrawStatsLine
     invoke DrawButtons
     invoke Flush
+    mov  frameWait, 250             ; about 30 fps only while something moves
+    cmp  animating, 0
+    je   ra_done
+    mov  frameWait, 30
+ra_done:
     ret
 RenderAll ENDP
 
@@ -2167,7 +2932,7 @@ RenderAll ENDP
 ; ---- report builder: append a zero-terminated string ----
 AppStr PROC USES esi edi pStr:DWORD
     mov  esi, pStr
-    mov  edi, OFFSET rptBuf
+    mov  edi, appBase
     add  edi, rptLen
 as_loop:
     mov  al, [esi]
@@ -2178,7 +2943,7 @@ as_loop:
     inc  edi
     jmp  as_loop
 as_done:
-    sub  edi, OFFSET rptBuf
+    sub  edi, appBase
     mov  rptLen, edi
     ret
 AppStr ENDP
@@ -2186,8 +2951,9 @@ AppStr ENDP
 ; ---- report builder: append one character ----
 AppCh PROC chv:DWORD
     mov  edx, rptLen
+    add  edx, appBase
     mov  eax, chv
-    mov  rptBuf[edx], al
+    mov  [edx], al
     inc  rptLen
     ret
 AppCh ENDP
@@ -2239,6 +3005,7 @@ AppTwo ENDP
 
 ; ---- assemble the full text report into rptBuf ----
 BuildReport PROC USES ebx esi edi
+    mov  appBase, OFFSET rptBuf
     mov  rptLen, 0
     invoke UpdateStats
     invoke AppStr, ADDR rpTitle
@@ -2256,6 +3023,12 @@ BuildReport PROC USES ebx esi edi
     invoke AppLine, ADDR rpErr, eax
     invoke AppLine, ADDR rpPeak, wpmPeak
     invoke AppLine, ADDR rpAvg, wpmAvg
+    invoke AppLine, ADDR rpTest, testBest
+    cmp  hasLast, 0
+    je   br_nolast
+    invoke AppLine, ADDR rpLastAvg, lastStats[ST_AVG*4]
+    invoke AppLine, ADDR rpLastPeak, lastStats[ST_PEAK*4]
+br_nolast:
 
     invoke AppStr, ADDR rpTime      ; mm:ss
     mov  eax, elapsedSec
@@ -2372,6 +3145,482 @@ br_fnext:
 BuildReport ENDP
 
 ; =============================================================
+;  HTML report (F2): a styled page with charts, opened in the browser
+; =============================================================
+
+; ---- report builder: append text with HTML special characters escaped ----
+AppEsc PROC USES esi pStr:DWORD
+    mov  esi, pStr
+ae_loop:
+    movzx eax, BYTE PTR [esi]
+    test eax, eax
+    jz   ae_done
+    cmp  eax, '<'
+    jne  ae_gt
+    invoke AppStr, ADDR hEscLt
+    jmp  ae_next
+ae_gt:
+    cmp  eax, '>'
+    jne  ae_amp
+    invoke AppStr, ADDR hEscGt
+    jmp  ae_next
+ae_amp:
+    cmp  eax, '&'
+    jne  ae_quot
+    invoke AppStr, ADDR hEscAmp
+    jmp  ae_next
+ae_quot:
+    cmp  eax, 22h
+    jne  ae_ch
+    invoke AppStr, ADDR hEscQuot
+    jmp  ae_next
+ae_ch:
+    invoke AppCh, eax
+ae_next:
+    inc  esi
+    jmp  ae_loop
+ae_done:
+    ret
+AppEsc ENDP
+
+; ---- report builder: one byte as two hex digits ----
+AppByteHex PROC b:DWORD
+    mov  eax, b
+    shr  eax, 4
+    and  eax, 0Fh
+    movzx eax, hexDigits[eax]
+    invoke AppCh, eax
+    mov  eax, b
+    and  eax, 0Fh
+    movzx eax, hexDigits[eax]
+    invoke AppCh, eax
+    ret
+AppByteHex ENDP
+
+; ---- report builder: colour as #rrggbb ----
+AppHex PROC USES ebx clr:DWORD
+    mov  ebx, clr
+    invoke AppCh, '#'
+    movzx eax, bl
+    invoke AppByteHex, eax
+    movzx eax, bh
+    invoke AppByteHex, eax
+    shr  ebx, 16
+    movzx eax, bl
+    invoke AppByteHex, eax
+    ret
+AppHex ENDP
+
+; ---- report builder: seconds as mm:ss ----
+AppMMSS PROC USES ebx secs:DWORD
+    mov  eax, secs
+    xor  edx, edx
+    mov  ecx, 60
+    div  ecx
+    mov  ebx, edx
+    cmp  eax, 99
+    jbe  am_min
+    mov  eax, 99
+am_min:
+    invoke AppTwo, eax
+    invoke AppCh, ':'
+    invoke AppTwo, ebx
+    ret
+AppMMSS ENDP
+
+; ---- stat card: label and big value; the caller adds the small line and hCardEnd ----
+AppCardOpen PROC pLabel:DWORD, val:DWORD, clr:DWORD
+    invoke AppStr, ADDR hCard1
+    invoke AppStr, pLabel
+    invoke AppStr, ADDR hCard2
+    invoke AppHex, clr
+    invoke AppStr, ADDR hCard3
+    invoke AppNum, val
+    invoke AppStr, ADDR hCard4
+    ret
+AppCardOpen ENDP
+
+; ---- table row: this session, last session, change ----
+AppCmpRow PROC pLabel:DWORD, cur:DWORD, prev:DWORD
+    invoke AppStr, ADDR hTrTd
+    invoke AppStr, pLabel
+    invoke AppStr, ADDR hTdTd
+    invoke AppNum, cur
+    invoke AppStr, ADDR hTdTd
+    invoke AppNum, prev
+    mov  eax, cur
+    sub  eax, prev
+    jz   cr_same
+    js   cr_down
+    push eax
+    invoke AppStr, ADDR hTdUp
+    pop  eax
+    invoke AppNum, eax
+    jmp  cr_end
+cr_down:
+    neg  eax
+    push eax
+    invoke AppStr, ADDR hTdDown
+    pop  eax
+    invoke AppNum, eax
+    jmp  cr_end
+cr_same:
+    invoke AppStr, ADDR hTdSame
+cr_end:
+    invoke AppStr, ADDR hTdTrEnd
+    ret
+AppCmpRow ENDP
+
+; ---- assemble KeyReport.html into htmlBuf ----
+BuildHtml PROC USES ebx esi edi
+    LOCAL mx:DWORD, cnt:DWORD, rowI:DWORD, pVk:DWORD
+    mov  appBase, OFFSET htmlBuf
+    mov  rptLen, 0
+    invoke UpdateStats
+
+    invoke AppStr, ADDR hHead       ; page head, title and date
+    invoke GetLocalTime, ADDR sysTime
+    movzx eax, sysTime
+    invoke AppNum, eax
+    invoke AppCh, '-'
+    movzx eax, sysTime+2
+    invoke AppTwo, eax
+    invoke AppCh, '-'
+    movzx eax, sysTime+6
+    invoke AppTwo, eax
+    invoke AppCh, ' '
+    movzx eax, sysTime+8
+    invoke AppTwo, eax
+    invoke AppCh, ':'
+    movzx eax, sysTime+10
+    invoke AppTwo, eax
+    invoke AppStr, ADDR hDot
+    invoke AppMMSS, elapsedSec
+    invoke AppStr, ADDR hSubEnd
+
+    ; ---- stat cards ----
+    mov  ebx, vowels
+    add  ebx, consonants
+    invoke AppCardOpen, ADDR hlTotal, totalKeys, C_CYAN
+    invoke AppStr, ADDR hlKeysSess
+    invoke AppStr, ADDR hCardEnd
+    invoke AppCardOpen, ADDR hlVowels, vowels, C_GREEN
+    invoke Percent, vowels, ebx
+    invoke AppNum, eax
+    invoke AppStr, ADDR hlPctLetters
+    invoke AppStr, ADDR hCardEnd
+    invoke AppCardOpen, ADDR hlCons, consonants, C_AMBER
+    invoke Percent, consonants, ebx
+    invoke AppNum, eax
+    invoke AppStr, ADDR hlPctLetters
+    invoke AppStr, ADDR hCardEnd
+    invoke AppCardOpen, ADDR hlAvg, wpmAvg, C_PURP
+    invoke AppStr, ADDR hlPeak
+    invoke AppNum, wpmPeak
+    invoke AppStr, ADDR hCardEnd
+    invoke AppStr, ADDR hGridNext
+    invoke AppCardOpen, ADDR hlWords, words, C_GREEN
+    invoke AppStr, ADDR hlLongest
+    invoke AppNum, longestWord
+    invoke AppStr, ADDR hCardEnd
+    invoke AppCardOpen, ADDR hlBs, bsCount, C_AMBER
+    invoke Percent, bsCount, totalKeys
+    invoke AppNum, eax
+    invoke AppStr, ADDR hlCorr
+    invoke AppStr, ADDR hCardEnd
+    invoke AppCardOpen, ADDR hlSpaces, spaces, C_TEXT
+    invoke AppStr, ADDR hlDigits
+    invoke AppNum, digits
+    invoke AppStr, ADDR hlSymbols
+    invoke AppNum, symbols
+    invoke AppStr, ADDR hCardEnd
+    invoke AppCardOpen, ADDR hlTest, testBest, C_PINK
+    invoke AppStr, ADDR hlAllTime
+    invoke AppNum, bestTestAll
+    invoke AppStr, ADDR hCardEnd
+    invoke AppStr, ADDR hGridEnd
+
+    ; ---- comparison with the last session ----
+    cmp  hasLast, 0
+    je   bh_bars
+    invoke AppStr, ADDR hCmpHead
+    invoke AppCmpRow, ADDR hlAvg, wpmAvg, lastStats[ST_AVG*4]
+    invoke AppCmpRow, ADDR hlPeakW, wpmPeak, lastStats[ST_PEAK*4]
+    invoke AppCmpRow, ADDR hlTotal, totalKeys, lastStats[ST_TOTAL*4]
+    invoke AppCmpRow, ADDR hlWords, words, lastStats[ST_WORDS*4]
+    invoke AppCmpRow, ADDR hlBs, bsCount, lastStats[ST_BS*4]
+    invoke AppStr, ADDR hCmpEnd
+
+bh_bars:                            ; ---- letter frequency bars ----
+    invoke AppStr, ADDR hBarsHead
+    mov  mx, 1
+    xor  esi, esi
+bh_max:
+    mov  eax, freq[esi*4 + 'A'*4]
+    add  eax, freq[esi*4 + 'a'*4]
+    cmp  eax, mx
+    jbe  bh_mnext
+    mov  mx, eax
+bh_mnext:
+    inc  esi
+    cmp  esi, 26
+    jb   bh_max
+    xor  esi, esi
+bh_bar:
+    mov  eax, freq[esi*4 + 'A'*4]
+    add  eax, freq[esi*4 + 'a'*4]
+    mov  cnt, eax
+    invoke AppStr, ADDR hBar1
+    cmp  cnt, 0
+    je   bh_nonum
+    invoke AppNum, cnt
+bh_nonum:
+    invoke AppStr, ADDR hBar2
+    mov  eax, cnt                   ; bar height in pixels (0-130)
+    mov  edx, 130
+    mul  edx
+    div  mx
+    invoke AppNum, eax
+    invoke AppStr, ADDR hBar3
+    lea  eax, [esi+'a']
+    invoke Classify, eax
+    mov  ecx, C_AMBER2
+    cmp  eax, CAT_VOWEL
+    jne  bh_col
+    mov  ecx, C_GREEN2
+bh_col:
+    invoke AppHex, ecx
+    invoke AppStr, ADDR hBar4
+    lea  eax, [esi+'A']
+    invoke AppCh, eax
+    invoke AppStr, ADDR hBar5
+    inc  esi
+    cmp  esi, 26
+    jb   bh_bar
+
+    ; ---- keyboard heatmap ----
+    invoke AppStr, ADDR hKbHead
+    mov  heatMax, 1
+    xor  ecx, ecx
+bh_hmax:
+    mov  eax, vkFreq[ecx*4]
+    cmp  eax, heatMax
+    jbe  bh_hnext
+    mov  heatMax, eax
+bh_hnext:
+    inc  ecx
+    cmp  ecx, 256
+    jb   bh_hmax
+    mov  rowI, 0
+bh_row:
+    invoke AppStr, ADDR hKbRow
+    mov  eax, rowI
+    imul eax, eax, 14
+    invoke AppNum, eax
+    invoke AppStr, ADDR hKbRow2
+    mov  eax, rowI
+    shl  eax, 4
+    mov  esi, kbRows[eax]
+    mov  eax, kbRows[eax+4]
+    mov  pVk, eax
+bh_key:
+    movzx edi, BYTE PTR [esi]
+    test edi, edi
+    jz   bh_rowend
+    mov  edx, pVk
+    movzx eax, BYTE PTR [edx]
+    mov  eax, vkFreq[eax*4]
+    mov  cnt, eax
+    invoke AppStr, ADDR hKey1
+    invoke HeatColor, cnt
+    invoke AppHex, eax
+    invoke AppStr, ADDR hKey2
+    invoke HeatText, cnt
+    invoke AppHex, eax
+    invoke AppStr, ADDR hKey3
+    mov  eax, edi
+    mov  keyNameBuf, al
+    mov  keyNameBuf+1, 0
+    invoke AppEsc, ADDR keyNameBuf
+    invoke AppStr, ADDR hKey4
+    inc  esi
+    inc  pVk
+    jmp  bh_key
+bh_rowend:
+    invoke AppStr, ADDR hDivEnd
+    inc  rowI
+    cmp  rowI, 4
+    jb   bh_row
+    invoke AppStr, ADDR hSpace1     ; space bar
+    invoke HeatColor, vkFreq[20h*4]
+    invoke AppHex, eax
+    invoke AppStr, ADDR hKey2
+    invoke HeatText, vkFreq[20h*4]
+    invoke AppHex, eax
+    invoke AppStr, ADDR hSpace2
+
+    ; ---- WPM history as an SVG area chart ----
+    invoke AppStr, ADDR hWpmHead
+    mov  mx, 20
+    xor  esi, esi
+bh_wmax:
+    cmp  esi, histCount
+    jae  bh_area
+    mov  eax, histHead
+    sub  eax, esi
+    dec  eax
+    and  eax, HIST_SIZE - 1
+    mov  eax, wpmHist[eax*4]
+    cmp  eax, mx
+    jbe  bh_wnext
+    mov  mx, eax
+bh_wnext:
+    inc  esi
+    jmp  bh_wmax
+bh_area:
+    cmp  histCount, 0
+    je   bh_svgend
+    invoke AppStr, ADDR hPoly1      ; filled area under the line
+    mov  eax, HIST_N
+    sub  eax, histCount
+    imul eax, eax, 10
+    invoke AppNum, eax
+    invoke AppStr, ADDR hBase
+    mov  edi, 0                     ; pass 0 = area, pass 1 = line
+bh_pass:
+    mov  esi, HIST_N
+    sub  esi, histCount
+bh_pt:
+    cmp  esi, HIST_N
+    jae  bh_passend
+    mov  eax, histHead
+    add  eax, esi
+    sub  eax, HIST_N
+    and  eax, HIST_SIZE - 1
+    mov  eax, wpmHist[eax*4]
+    mov  edx, 110
+    mul  edx
+    div  mx
+    mov  ebx, 120
+    sub  ebx, eax                   ; y
+    imul eax, esi, 10               ; x
+    invoke AppNum, eax
+    invoke AppCh, ','
+    invoke AppNum, ebx
+    invoke AppCh, ' '
+    inc  esi
+    jmp  bh_pt
+bh_passend:
+    test edi, edi
+    jnz  bh_lineend
+    invoke AppNum, (HIST_N - 1) * 10        ; close the area at the base line
+    invoke AppStr, ADDR hBaseEnd
+    invoke AppStr, ADDR hPoly2              ; then the line on top
+    mov  edi, 1
+    jmp  bh_pass
+bh_lineend:
+    invoke AppStr, ADDR hPolyEnd
+bh_svgend:
+    invoke AppStr, ADDR hWpmEnd
+
+    ; ---- top 5 table ----
+    invoke AppStr, ADDR hTopHead
+    xor  esi, esi
+bh_top:
+    cmp  esi, 5
+    jae  bh_topend
+    invoke AppStr, ADDR hTrTd
+    lea  eax, [esi+1]
+    invoke AppNum, eax
+    invoke AppStr, ADDR hTdTd
+    cmp  esi, top5N
+    jae  bh_t1
+    invoke KeyName, top5Key[esi*4]
+    invoke AppEsc, eax
+    invoke AppStr, ADDR hTdNum
+    invoke AppNum, top5Cnt[esi*4]
+    jmp  bh_t2
+bh_t1:
+    invoke AppStr, ADDR hTdNum
+bh_t2:
+    invoke AppStr, ADDR hTdTd
+    cmp  esi, bi5N
+    jae  bh_t3
+    invoke NgramName, bi5Idx[esi*4], 2
+    invoke AppStr, eax
+    invoke AppStr, ADDR hTdNum
+    invoke AppNum, bi5Cnt[esi*4]
+    jmp  bh_t4
+bh_t3:
+    invoke AppStr, ADDR hTdNum
+bh_t4:
+    invoke AppStr, ADDR hTdTd
+    cmp  esi, tri5N
+    jae  bh_t5
+    invoke NgramName, tri5Idx[esi*4], 3
+    invoke AppStr, eax
+    invoke AppStr, ADDR hTdNum
+    invoke AppNum, tri5Cnt[esi*4]
+    jmp  bh_t6
+bh_t5:
+    invoke AppStr, ADDR hTdNum
+bh_t6:
+    invoke AppStr, ADDR hTdTrEnd
+    inc  esi
+    jmp  bh_top
+bh_topend:
+    invoke AppStr, ADDR hTopEnd
+
+    ; ---- every key pressed ----
+    invoke AppStr, ADDR hFreqHead
+    xor  esi, esi
+bh_fl:
+    cmp  freq[esi*4], 0
+    je   bh_fnext
+    invoke AppStr, ADDR hFreq1
+    invoke KeyName, esi
+    invoke AppEsc, eax
+    invoke AppStr, ADDR hFreq2
+    invoke AppNum, freq[esi*4]
+    invoke AppStr, ADDR hFreq3
+bh_fnext:
+    inc  esi
+    cmp  esi, 256
+    jb   bh_fl
+    invoke AppStr, ADDR hFoot
+    ret
+BuildHtml ENDP
+
+; ---- write a buffer to a file; eax = 1 on success ----
+SaveFile PROC USES ebx pName:DWORD, pBuf:DWORD, len:DWORD
+    invoke CreateFileA, pName, 40000000h, 0, 0, 2, 80h, 0
+    cmp  eax, -1
+    je   sf_fail
+    mov  ebx, eax
+    invoke WriteFile, ebx, pBuf, len, ADDR nWritten, 0
+    invoke CloseHandle, ebx
+    mov  eax, 1
+    ret
+sf_fail:
+    xor  eax, eax
+    ret
+SaveFile ENDP
+
+; ---- open KeyReport.html in the default browser (cmd /c start) ----
+OpenHtml PROC
+    invoke GetEnvironmentVariableA, ADDR sNoBrowser, ADDR envBuf, SIZEOF envBuf
+    test eax, eax                   ; KPM_NO_BROWSER set -> just save
+    jnz  oh_done
+    invoke CreateProcessA, 0, ADDR sOpenCmd, 0, 0, 0, 08000000h, 0, 0, ADDR startInfo, ADDR procInfo
+    test eax, eax
+    jz   oh_done
+    invoke CloseHandle, procInfo
+    invoke CloseHandle, procInfo+4
+oh_done:
+    ret
+OpenHtml ENDP
+
+; =============================================================
 ;  Actions
 ; =============================================================
 
@@ -2440,16 +3689,21 @@ DoReset PROC USES edi
     ret
 DoReset ENDP
 
-; ---- write the report to KeyReport.txt ----
-DoSave PROC USES ebx
+; ---- write KeyReport.txt and KeyReport.html; openIt = show it in the browser ----
+DoSave PROC openIt:DWORD
     invoke BuildReport
-    invoke CreateFileA, ADDR sReportFile, 40000000h, 0, 0, 2, 80h, 0
-    cmp  eax, -1
-    je   ds_fail
-    mov  ebx, eax
-    invoke WriteFile, ebx, ADDR rptBuf, rptLen, ADDR nWritten, 0
-    invoke CloseHandle, ebx
+    invoke SaveFile, ADDR sReportFile, ADDR rptBuf, rptLen
+    test eax, eax
+    jz   ds_fail
+    invoke BuildHtml
+    invoke SaveFile, ADDR sHtmlFile, ADDR htmlBuf, rptLen
+    test eax, eax
+    jz   ds_fail
     invoke SetMsg, ADDR sMsgSaved, C_OK
+    cmp  openIt, 0
+    je   ds_done
+    invoke OpenHtml
+ds_done:
     ret
 ds_fail:
     invoke SetMsg, ADDR sMsgFail, C_RED
@@ -2472,7 +3726,7 @@ an_hi:
     ret
 AdjustN ENDP
 
-; ---- 0 reset, 1 save, 2 pause/resume, 3 quit, 4 autosave on/off ----
+; ---- 0 reset, 1 save, 2 pause/resume, 3 quit, 4 autosave on/off, 5 typing test ----
 DoAction PROC actId:DWORD
     mov  eax, actId
     cmp  eax, 0
@@ -2482,7 +3736,7 @@ DoAction PROC actId:DWORD
 da_save:
     cmp  eax, 1
     jne  da_pause
-    invoke DoSave
+    invoke DoSave, 1
     ret
 da_pause:
     cmp  eax, 2
@@ -2501,6 +3755,8 @@ da_quit:
     mov  quitFlag, 1
     ret
 da_auto:
+    cmp  eax, 4
+    jne  da_view
     xor  autoSave, 1
     cmp  autoSave, 0
     je   da_autooff
@@ -2508,6 +3764,15 @@ da_auto:
     ret
 da_autooff:
     invoke SetMsg, ADDR sMsgAutoOff, C_RED
+    ret
+da_view:
+    xor  viewMode, 1
+    cmp  viewMode, 0
+    je   da_dash
+    invoke SetMsg, ADDR sMsgTest, C_CYAN
+    ret
+da_dash:
+    invoke SetMsg, ADDR sMsgDash, C_CYAN
     ret
 DoAction ENDP
 
@@ -2547,8 +3812,13 @@ hk_f3:
     ret
 hk_f4:
     cmp  ebx, VK_F4
-    jne  hk_left
+    jne  hk_f5
     invoke DoAction, 4
+    ret
+hk_f5:
+    cmp  ebx, VK_F5
+    jne  hk_left
+    invoke DoAction, 5
     ret
 hk_left:
     cmp  ebx, VK_LEFT
@@ -2567,6 +3837,10 @@ hk_char:
     jne  hk_done
 hk_rep:
     invoke CountChar, esi, ebx
+    cmp  viewMode, 0                ; the typing test sees the key too
+    je   hk_next
+    invoke TestKey, esi
+hk_next:
     dec  edi
     jnz  hk_rep
 hk_done:
@@ -2769,10 +4043,15 @@ startClock:
     invoke GetTickCount
     mov  startTick, eax
     mov  lastSample, eax
+    invoke NewTest
+    invoke LoadStats
+    cmp  hasLast, 0
+    je   mainLoop
+    invoke SetMsg, ADDR sMsgWelcome, C_CYAN
 
 mainLoop:
     invoke RenderAll
-    invoke WaitForSingleObject, hIn, 250    ; redraw at least 4x a second
+    invoke WaitForSingleObject, hIn, frameWait  ; 250 ms, or 30 ms while animating
     test eax, eax
     jnz  mainLoop
 readEvents:
@@ -2795,12 +4074,13 @@ checkQuit:
     cmp  quitFlag, 0
     je   readEvents
 
-    ; ---- quit: optional autosave, restore the console, print the report ----
+    ; ---- quit: save stats, optional autosave, restore the console, print the report ----
+    invoke SaveStats
     cmp  autoSave, 0
     je   skipSave
     cmp  totalKeys, 0
     je   skipSave
-    invoke DoSave
+    invoke DoSave, 0
 skipSave:
     invoke BuildReport
     invoke RestoreScreen

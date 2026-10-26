@@ -3,3 +3,5 @@
 *.ilk
 *.pdb
 KeyReport.txt
+KeyReport.html
+KeyStats.dat
