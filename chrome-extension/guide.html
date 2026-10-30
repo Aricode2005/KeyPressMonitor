@@ -1,0 +1,139 @@
+<!DOCTYPE html>
+<html lang="en" data-theme="midnight">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>Welcome to KeyPressMonitor — User Guide</title>
+  <link rel="stylesheet" href="styles.css">
+  <style>
+    .guide-wrap { max-width: 900px; margin: 28px auto; padding: 0 20px; }
+    .hero {
+      background: linear-gradient(135deg, var(--hdr1), var(--hdr2));
+      border: 1px solid var(--border);
+      border-radius: 14px;
+      padding: 26px 28px;
+      margin-bottom: 20px;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 20px;
+    }
+    .hero h1 { font-size: 24px; color: #fff; margin-bottom: 6px; }
+    .hero p { color: #C7D2FE; font-size: 14px; line-height: 1.5; }
+    .steps-grid { display: grid; grid-template-columns: repeat(2, 1fr); gap: 14px; margin-bottom: 20px; }
+    .step-card {
+      background: var(--panel);
+      border: 1px solid var(--border);
+      border-radius: 12px;
+      padding: 16px 18px;
+    }
+    .step-num {
+      display: inline-block;
+      background: var(--purp2);
+      color: #fff;
+      font-weight: 700;
+      font-size: 11px;
+      padding: 2px 8px;
+      border-radius: 99px;
+      margin-bottom: 8px;
+    }
+    .step-card h3 { font-size: 15px; color: #fff; margin-bottom: 6px; }
+    .step-card p { color: var(--muted); font-size: 13px; line-height: 1.55; }
+    .kbd-tag {
+      background: var(--track);
+      border: 1px solid var(--border);
+      color: var(--cyan);
+      padding: 1px 6px;
+      border-radius: 4px;
+      font-family: Consolas, monospace;
+      font-size: 12px;
+    }
+    .try-box {
+      background: var(--panel);
+      border: 1px solid var(--border);
+      border-radius: 12px;
+      padding: 18px;
+      margin-bottom: 20px;
+    }
+    .try-input {
+      width: 100%;
+      margin-top: 10px;
+      background: var(--track);
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      padding: 12px;
+      color: #fff;
+      font-family: Consolas, monospace;
+      font-size: 14px;
+      outline: none;
+    }
+    .try-input:focus { border-color: var(--cyan); }
+  </style>
+</head>
+<body>
+  <header class="header">
+    <div class="brand">
+      <span class="brand-diamond">◆</span>
+      <span class="brand-title">KEY PRESS MONITOR</span>
+      <span class="brand-sub">Quick Start & User Guide</span>
+    </div>
+    <div class="hdr-right">
+      <a href="popup.html" class="pill-btn cyan" style="text-decoration:none;padding:5px 12px"><span>Open Full Dashboard →</span></a>
+    </div>
+  </header>
+
+  <div class="guide-wrap">
+    <div class="hero">
+      <div>
+        <h1>Welcome to KeyPressMonitor! 🎉</h1>
+        <p>Your real-time keyboard analytics dashboard, typing speed trainer, and ergonomics tracker is now active across Google Chrome.</p>
+      </div>
+      <a href="popup.html" class="pill-btn purp" style="text-decoration:none;padding:8px 16px;font-size:13px;white-space:nowrap"><span>Launch Dashboard</span></a>
+    </div>
+
+    <div class="try-box">
+      <div class="panel-hdr"><span>⚡ TRY IT RIGHT NOW — TYPE BELOW & WATCH THE BOTTOM-RIGHT MINI HUD</span></div>
+      <p style="color:var(--muted);font-size:13px">Type a sentence below and watch your WPM, Vowels/Consonants, and Streak update live:</p>
+      <input class="try-input" type="text" placeholder="Type anything here to test live telemetry... e.g. The quick brown fox jumps over 2026!" autofocus>
+    </div>
+
+    <div class="steps-grid">
+      <div class="step-card">
+        <span class="step-num">STEP 1 · PIN TO TOOLBAR</span>
+        <h3>📌 Pin the Extension Icon</h3>
+        <p>Click the <span class="kbd-tag">🧩 Extensions</span> icon in the top-right corner of Chrome and click the <span class="kbd-tag">📌 Pin</span> icon next to <b>KeyPressMonitor</b>. The toolbar icon badge shows your live WPM or key count.</p>
+      </div>
+
+      <div class="step-card">
+        <span class="step-num">STEP 2 · FLOATING MINI-HUD</span>
+        <h3>🖥️ Draggable & Resizable Live HUD</h3>
+        <p>As you type on any website, the floating <b>KP Mini-HUD</b> shows live WPM, Keys, Vowels/Consonants (<span class="kbd-tag">V/C</span>), and Streak. <b>Drag it anywhere</b> on screen, <b>drag its bottom-right corner</b> (or scroll your mouse wheel over it) to resize/zoom, or click <span class="kbd-tag">_</span> to minimize!</p>
+      </div>
+
+      <div class="step-card">
+        <span class="step-num">STEP 3 · REFRESH / CLEAR RECORDS</span>
+        <h3>↻ Reset All Stats Anytime</h3>
+        <p>Want a fresh start? Click <span class="kbd-tag">↻ Reset</span> directly on the floating bottom-right HUD, or click <span class="kbd-tag">↻ Refresh / Clear All</span> (<span class="kbd-tag">F1</span>) in the popup header to wipe all counters back to zero.</p>
+      </div>
+
+      <div class="step-card">
+        <span class="step-num">STEP 4 · 3 VIEWS & THEMES</span>
+        <h3>🎯 Typing Test, Biomechanics & Themes</h3>
+        <p>Open the popup (or click <span class="kbd-tag">⛶ Full Tab</span>) to explore:
+          <br>• <span class="kbd-tag">F5 Test</span>: Practice Standard, Quotes, Code, or Numbers (<span class="kbd-tag">Tab</span> switches mode)
+          <br>• <span class="kbd-tag">F6 Bio/XP</span>: Left/Right hand %, 8-finger load, latency & 6 badges
+          <br>• <span class="kbd-tag">F7 Theme</span> / <span class="kbd-tag">F8 Sound</span>: 4 themes + mechanical key clicks
+        </p>
+      </div>
+    </div>
+
+    <div class="panel" style="padding:14px 18px">
+      <div class="panel-hdr"><span>🔒 100% LOCAL & PRIVATE</span></div>
+      <p style="color:var(--muted);font-size:12.5px;line-height:1.5">
+        All keystroke counts are processed and stored <b>exclusively on your device</b> inside <code>chrome.storage.local</code>. Password fields (<code>&lt;input type="password"&gt;</code>) are automatically ignored, and zero data is ever sent to any external server.
+      </p>
+    </div>
+  </div>
+  <script src="content.js"></script>
+</body>
+</html>

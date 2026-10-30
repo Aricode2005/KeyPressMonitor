@@ -23,12 +23,22 @@
 ;      autosave on exit
 ;  12. Key-press ripple on the heatmap and count-up card numbers
 ;  13. Typing test screen (F5): live WPM, accuracy, errors, personal best
-;  14. HTML report with charts (F2), opened in the browser
+;  14. HTML / CSV / JSON reports (F2), opened in the browser
 ;  15. Compare with the last session (saved in KeyStats.dat)
+;  16. Ergonomics & Biomechanics screen (F6): left/right hand balance,
+;      8-finger load bars, row distribution (number/top/home/bottom/space)
+;  17. Rhythm & Cadence analytics: average inter-key latency (ms),
+;      burst WPM, active vs. idle time, rhythm consistency %
+;  18. Achievements, Streaks & XP Rank system: live streak counter,
+;      best streak, XP level & rank badge, 6 unlockable achievements
+;  19. Custom Themes (F7: Midnight, Cyberpunk, Matrix, Nord) and
+;      Mechanical Key Sound synth toggle (F8 via kernel32 Beep)
+;  20. Typing Test categories (Tab cycles Standard, Quotes, Code,
+;      Numbers & Symbols)
 ;
-;  Keys:  F1 reset   F2 save report   F3 pause   F4 autosave
-;         F5 typing test   ESC quit
-;         Left / Right arrow (or mouse wheel) change N
+;  Keys:  F1 reset   F2 save reports   F3 pause   F4 autosave
+;         F5 typing test   F6 biomechanics   F7 theme   F8 sound
+;         Tab test mode    Left/Right (or wheel) change N   ESC quit
 ;
 ;  Uses only kernel32.lib (comes with Visual Studio / Windows SDK).
 ; =============================================================
@@ -66,6 +76,7 @@ ExitProcess                   PROTO :DWORD
 ReadFile                      PROTO :DWORD, :DWORD, :DWORD, :DWORD, :DWORD
 CreateProcessA                PROTO :DWORD, :DWORD, :DWORD, :DWORD, :DWORD, :DWORD, :DWORD, :DWORD, :DWORD, :DWORD
 GetLocalTime                  PROTO :DWORD
+Beep                          PROTO :DWORD, :DWORD
 includelib kernel32.lib
 
 ; ---------- procedures used before their definition ----------
@@ -89,6 +100,10 @@ VK_F2             EQU 71h
 VK_F3             EQU 72h
 VK_F4             EQU 73h
 VK_F5             EQU 74h
+VK_F6             EQU 75h
+VK_F7             EQU 76h
+VK_F8             EQU 77h
+VK_TAB            EQU 09h
 
 SCR_W             EQU 100         ; dashboard size in character cells
 SCR_H             EQU 30
@@ -100,8 +115,11 @@ HIST_SIZE         EQU 64          ; ring size (power of two)
 WPM_WINDOW        EQU 5000        ; WPM measured over the last 5 seconds
 MSG_TIME          EQU 3000        ; status message shown for 3 seconds
 BTN_Y             EQU 28          ; row of the button bar
-NBTN              EQU 6           ; number of buttons
-NSENT             EQU 6           ; typing test sentences
+NBTN              EQU 8           ; number of buttons
+NSENT             EQU 12          ; typing test sentences (4 modes x 3)
+NMODES            EQU 4           ; typing test modes
+NTHEMES           EQU 4           ; colour themes
+NBADGES           EQU 6           ; unlockable achievements
 RIPPLE_MS         EQU 600         ; heatmap ripple length
 RIPPLE_STEP       EQU 70          ; ms for the ripple to move one key further
 STAT_N            EQU 12          ; DWORDs in KeyStats.dat
@@ -134,12 +152,7 @@ A_PAGE            EQU 07h         ; console attribute used to clear the window
 
 ; ---------- colours (COLORREF = 00BBGGRRh) ----------
 C_KEEP      EQU 0FFFFFFFFh ; leave the cell's colour unchanged
-C_PAGE      EQU 01A0E0Bh  ; #0B0E1A
-C_PANEL     EQU 0291712h  ; #121729
-C_BORDER    EQU 052332Ah  ; #2A3352
-C_TRACK     EQU 038221Ch  ; #1C2238
-C_AXIS      EQU 0452A23h  ; #232A45
-C_OFFKEY    EQU 040261Fh  ; #1F2640
+; theme-aware surface colours (updated by ApplyTheme in .data)
 C_TEXT      EQU 0F0E8E2h  ; #E2E8F0
 C_MUTED     EQU 08B7464h  ; #64748B
 C_DIM       EQU 066453Bh  ; #3B4566
@@ -160,11 +173,27 @@ C_BRONZE    EQU 03C92FBh  ; #FB923C
 C_RED       EQU 0481DE1h  ; #E11D48
 C_BLUE      EQU 0EB6325h  ; #2563EB
 C_PAUSEBTN  EQU 0048ACAh  ; #CA8A04
-C_HDR1      EQU 04B1B1Eh  ; #1E1B4B
-C_HDR2      EQU 0B6215Bh  ; #5B21B6
+; header gradient colours (updated by ApplyTheme in .data)
 C_HDRTXT    EQU 0FED2C7h  ; #C7D2FE
 
 .data
+C_PAGE       DD 01A0E0Bh          ; active theme surface colours
+C_PANEL      DD 0291712h
+C_BORDER     DD 052332Ah
+C_TRACK      DD 038221Ch
+C_AXIS       DD 0452A23h
+C_OFFKEY     DD 040261Fh
+C_HDR1       DD 04B1B1Eh
+C_HDR2       DD 0B6215Bh
+themeIdx     DD 0                 ; 0=Midnight, 1=Cyberpunk, 2=Matrix, 3=Nord
+soundOn      DD 0                 ; F8: mechanical key sound synth (Beep)
+
+; 4 themes x 8 colours: PAGE, PANEL, BORDER, TRACK, AXIS, OFFKEY, HDR1, HDR2
+themeTable   DD 01A0E0Bh, 0291712h, 052332Ah, 038221Ch, 0452A23h, 040261Fh, 04B1B1Eh, 0B6215Bh ; Midnight
+             DD 01A0614h, 02E0B24h, 07A1C5Ch, 03D1030h, 0561644h, 04A123Bh, 06B0F4Ch, 0B000FFh ; Cyberpunk
+             DD 0081408h, 00D220Dh, 01E4D1Eh, 0122E12h, 0173B17h, 0143314h, 00F380Fh, 01E7A1Eh ; Matrix
+             DD 040342Eh, 052423Bh, 06A564Ch, 0493B34h, 05E4C43h, 056463Eh, 0755E4Ch, 0A1815Eh ; Nord
+
 hIn          DD ?
 hOut         DD ?
 oldInMode    DD 0
@@ -237,7 +266,33 @@ tri5N        DD 0
 prevL1       DD -1                ; previous letter (0-25), -1 = none
 prevL2       DD -1                ; letter before that
 
-viewMode     DD 0                 ; 0 = dashboard, 1 = typing test
+viewMode     DD 0                 ; 0 = dashboard, 1 = typing test, 2 = ergonomics & achievements
+; ---- ergonomics & biomechanics ----
+leftHand     DD 0                 ; keys pressed with left hand
+rightHand    DD 0                 ; keys pressed with right hand
+fingerCnt    DD 9 DUP(0)          ; 0..3 left pinky..index, 4..7 right index..pinky, 8 thumbs
+rowCnt       DD 5 DUP(0)          ; 0=number, 1=top(QWERTY), 2=home(ASDF), 3=bottom(ZXCV), 4=space/other
+handAlt      DD 0                 ; hand alternations
+lastHand     DD -1                ; 0=left, 1=right
+
+; ---- rhythm & cadence analytics ----
+lastKeyTick  DD 0                 ; tick of previous key press
+latSum       DD 0                 ; sum of inter-key latencies (< 2000 ms)
+latCnt       DD 0                 ; count of inter-key latencies
+avgLatMs     DD 0                 ; average inter-key latency in ms
+minLatMs     DD 0                 ; fastest inter-key transition (ms)
+burstWpm     DD 0                 ; fastest 5-key burst WPM
+activeMs     DD 0                 ; active typing time (sum of intervals < 2000 ms)
+rhythmScore  DD 100               ; consistency score (0-100%)
+
+; ---- streaks, XP & achievements ----
+curStreak    DD 0                 ; keys since last Backspace/mistake
+bestStreak   DD 0                 ; best error-free key streak
+xpScore      DD 0                 ; total XP earned this session
+xpLevel      DD 1                 ; current level (1 + xpScore / 250)
+badgesMask   DD 0                 ; bitmask of unlocked achievements (0..5)
+badgeCount   DD 0                 ; number of unlocked badges (0..6)
+testMode     DD 0                 ; 0=Standard, 1=Quotes, 2=Code, 3=Numbers/Symbols
 frameWait    DD 250               ; ms to wait for input (30 while animating)
 animating    DD 0
 rippleVk     DD -1                ; last key pressed, for the heatmap ripple
@@ -400,24 +455,38 @@ sBK1         DB " F2 ", 0
 sBK2         DB " F3 ", 0
 sBK3         DB " F4 ", 0
 sBK4         DB " ESC ", 0
+sBK5         DB " F5 ", 0
+sBK6         DB " F6 ", 0
+sBK7         DB " F7 ", 0
 sBN0         DB " Reset ", 0
-sBN1         DB " Save ", 0
+sBN1         DB " Export ", 0
 sBN2         DB " Pause ", 0
 sBN2R        DB " Resume ", 0
-sBN3         DB " Autosave off ", 0
-sBN3On       DB " Autosave on ", 0
+sBN3         DB " Auto:Off ", 0
+sBN3On       DB " Auto:On ", 0
 sBN4         DB " Quit ", 0
-sBK5         DB " F5 ", 0
 sBN5         DB " Test ", 0
-sBN5B        DB " Back ", 0
-btnKeys      DD OFFSET sBK0, OFFSET sBK1, OFFSET sBK2, OFFSET sBK3, OFFSET sBK5, OFFSET sBK4
-btnNames     DD OFFSET sBN0, OFFSET sBN1, OFFSET sBN2, OFFSET sBN3, OFFSET sBN5, OFFSET sBN4
-btnColors    DD C_BLUE, C_BLUE, C_BLUE, C_BLUE, C_PURP2, C_RED
-btnAction    DB 0, 1, 2, 4, 5, 3
-sHint        DB "Mouse: click the buttons  ", 0FAh, "  <- -> or wheel: resize N  ", 0FAh
-             DB "  F5: typing test", 0
+sBN5B        DB " Dash ", 0
+sBN6         DB " Bio/XP ", 0
+sBN7         DB " Theme ", 0
+btnKeys      DD OFFSET sBK0, OFFSET sBK1, OFFSET sBK2, OFFSET sBK3, OFFSET sBK5, OFFSET sBK6, OFFSET sBK7, OFFSET sBK4
+btnNames     DD OFFSET sBN0, OFFSET sBN1, OFFSET sBN2, OFFSET sBN3, OFFSET sBN5, OFFSET sBN6, OFFSET sBN7, OFFSET sBN4
+btnColors    DD C_BLUE, C_BLUE, C_BLUE, C_BLUE, C_PURP2, C_CYAN2, C_GREEN2, C_RED
+btnAction    DB 0, 1, 2, 4, 5, 6, 7, 3
+sHint        DB "Click buttons ", 0FAh, " <-/->: N ", 0FAh
+             DB " F5: Test  F6: Bio/XP  F7: Theme  F8: Sound  Tab: Mode", 0
 sMsgReset    DB 0FBh, " Counters reset", 0
-sMsgSaved    DB 0FBh, " Saved KeyReport.txt and KeyReport.html", 0
+sMsgSaved    DB 0FBh, " Exported TXT, HTML, CSV and JSON reports", 0
+sMsgErgo     DB 0FBh, " Biomechanics, Rhythm & Achievements (F6 = dashboard)", 0
+sMsgTheme0   DB 0FBh, " Theme: Midnight", 0
+sMsgTheme1   DB 0FBh, " Theme: Cyberpunk Neon", 0
+sMsgTheme2   DB 0FBh, " Theme: Matrix Hacker", 0
+sMsgTheme3   DB 0FBh, " Theme: Nord Frost", 0
+themeMsgs    DD OFFSET sMsgTheme0, OFFSET sMsgTheme1, OFFSET sMsgTheme2, OFFSET sMsgTheme3
+sMsgSndOn    DB 0FBh, " Mechanical key sound ON (F8)", 0
+sMsgSndOff   DB "x Mechanical key sound OFF (F8)", 0
+sCsvFile     DB "KeyReport.csv", 0
+sJsonFile    DB "KeyReport.json", 0
 sMsgFail     DB "x Could not write the report files", 0
 sMsgTest     DB 0FBh, " Typing test - start typing (F5 = back)", 0
 sMsgDash     DB 0FBh, " Dashboard", 0
@@ -445,14 +514,26 @@ vtFrameEnd   DB 27, "[?2026l", 0
 vtClear      DB 27, "[48;2;11;14;26m", 27, "[2J", 0 ; fill the window with the page colour
 vtReset      DB 27, "[0m", 27, "[2J", 27, "[H", 27, "[?25h", 0
 
-; ---- typing test sentences and text ----
+; ---- typing test sentences (4 modes x 3 sentences = 12) ----
 sent0        DB "the quick brown fox jumps over the lazy dog", 0
-sent1        DB "assembly language gives you full control of the machine", 0
-sent2        DB "pack my box with five dozen liquor jugs", 0
-sent3        DB "every keystroke is counted, classified and drawn in real time", 0
-sent4        DB "interrupts, registers and memory are the heart of a computer", 0
-sent5        DB "sphinx of black quartz, judge my vow", 0
+sent1        DB "pack my box with five dozen liquor jugs", 0
+sent2        DB "sphinx of black quartz, judge my vow", 0
+sent3        DB "assembly language gives you full control of the machine", 0
+sent4        DB "every keystroke is counted, classified and drawn in real time", 0
+sent5        DB "simplicity is prerequisite for reliability in software design", 0
+sent6        DB "mov eax, [ebx+ecx*4] ; invoke WriteConsoleW, hOut, pBuf, n", 0
+sent7        DB "for (int i = 0; i < n; ++i) { freq[str[i]]++; total += 1; }", 0
+sent8        DB "const wpm = Math.round((chars / 5) / (elapsedMs / 60000));", 0
+sent9        DB "192.168.1.254:8080 #42 = 100% - $39.95 + (2026 / 4) * 7!", 0
+sent10       DB "0xFF00AA55 -> [256 * 4] = 1024 bytes @ 60fps (33.3ms/frame)", 0
+sent11       DB "key #1: 98.6%, key #2: 450ms, total = 1,234,567 (0x12D687)", 0
 sentences    DD OFFSET sent0, OFFSET sent1, OFFSET sent2, OFFSET sent3, OFFSET sent4, OFFSET sent5
+             DD OFFSET sent6, OFFSET sent7, OFFSET sent8, OFFSET sent9, OFFSET sent10, OFFSET sent11
+sMode0       DB "STANDARD", 0
+sMode1       DB "QUOTES", 0
+sMode2       DB "CODE", 0
+sMode3       DB "NUMBERS", 0
+modeNames    DD OFFSET sMode0, OFFSET sMode1, OFFSET sMode2, OFFSET sMode3
 sCardTW      DB " SPEED ", 0FAh, " WPM ", 0
 sCardAcc     DB " ACCURACY % ", 0
 sCardErr     DB " ERRORS ", 0
@@ -478,7 +559,96 @@ sResTime     DB "TIME       ", 0
 sResBest     DB "BEST       ", 0
 sResAll      DB "   ALL-TIME ", 0
 sNewBest     DB " NEW PERSONAL BEST! ", 0
-sAgain       DB "Press Enter for the next sentence  ", 0FAh, "  F5 = back to the dashboard", 0
+sAgain       DB "Enter = next sentence  ", 0FAh, "  Tab = change mode  ", 0FAh, "  F5 = dashboard", 0
+sModeLbl     DB " MODE: ", 0
+sTabHint     DB " (Tab) ", 0
+
+; ---- ergonomics, rhythm & achievements strings ----
+sHdrLvl      DB "LVL ", 0
+sRank0       DB "NOVICE", 0
+sRank1       DB "TYPIST", 0
+sRank2       DB "PRO", 0
+sRank3       DB "MASTER", 0
+sRank4       DB "GRANDMASTER", 0
+rankNames    DD OFFSET sRank0, OFFSET sRank1, OFFSET sRank2, OFFSET sRank3, OFFSET sRank4
+sStreakSt    DB "  STREAK ", 0
+sLatSt       DB "  LATENCY ", 0
+sMsUnit      DB "ms", 0
+
+sCardLH      DB " LEFT HAND % ", 0
+sCardRH      DB " RIGHT HAND % ", 0
+sCardLat     DB " AVG LATENCY ms ", 0
+sCardStrk    DB " KEY STREAK ", 0
+sSubKeys     DB "keys: ", 0
+sSubAlt      DB "alt: ", 0
+sSubMinLat   DB "min ", 0
+sSubRhythm   DB "ms  rhythm ", 0
+sSubBestSt   DB "best ", 0
+sSubBadges   DB "  badges ", 0
+
+sBoxFinger   DB " FINGER LOAD & HAND BALANCE ", 0
+sBoxRows     DB " KEYBOARD ROW & RHYTHM ANALYTICS ", 0
+sBoxBadges   DB " ACHIEVEMENTS, XP & RANK PROGRESS ", 0
+sFnL4        DB "L-Pinky ", 0
+sFnL3        DB "L-Ring  ", 0
+sFnL2        DB "L-Middle", 0
+sFnL1        DB "L-Index ", 0
+sFnR1        DB "R-Index ", 0
+sFnR2        DB "R-Middle", 0
+sFnR3        DB "R-Ring  ", 0
+sFnR4        DB "R-Pinky ", 0
+sFnTh        DB "Thumbs  ", 0
+fingerNames  DD OFFSET sFnL4, OFFSET sFnL3, OFFSET sFnL2, OFFSET sFnL1
+             DD OFFSET sFnR1, OFFSET sFnR2, OFFSET sFnR3, OFFSET sFnR4, OFFSET sFnTh
+sRowNum      DB "Number Row (1-0) ", 0
+sRowTop      DB "Top Row (QWERTY) ", 0
+sRowHome     DB "Home Row (ASDFG) ", 0
+sRowBot      DB "Bottom Row (ZXCV)", 0
+sRowSpc      DB "Space & Modifiers", 0
+rowNames     DD OFFSET sRowNum, OFFSET sRowTop, OFFSET sRowHome, OFFSET sRowBot, OFFSET sRowSpc
+sRhyActive   DB "Active Typing Time : ", 0
+sRhyBurst    DB "Peak Burst Speed   : ", 0
+sRhyCons     DB "Rhythm Consistency : ", 0
+sRhyAlt      DB "Hand Alternations  : ", 0
+
+sBdg0        DB "First Steps (50+ keys)", 0
+sBdg1        DB "Speed Demon (60+ Peak WPM)", 0
+sBdg2        DB "Hyper Velocity (100+ Peak WPM)", 0
+sBdg3        DB "Flawless Streak (100+ streak)", 0
+sBdg4        DB "Marathon Runner (500+ keys)", 0
+sBdg5        DB "Polyglot Coder (20+ symbols/digits)", 0
+badgeNames   DD OFFSET sBdg0, OFFSET sBdg1, OFFSET sBdg2, OFFSET sBdg3, OFFSET sBdg4, OFFSET sBdg5
+sXpLbl       DB "XP ", 0
+sUnlocked    DB "[UNLOCKED]", 0
+sLocked      DB "[LOCKED]  ", 0
+
+; letter 'a'..'z' -> finger index (0..3 = L pinky..index, 4..7 = R index..pinky)
+letterFinger DB 0, 3, 2, 2, 2, 3, 3, 4, 5, 4, 5, 6, 4, 4, 6, 7, 0, 3, 1, 3, 4, 3, 1, 1, 4, 0
+; letter 'a'..'z' -> row index (1 = top, 2 = home, 3 = bottom)
+letterRow    DB 2, 3, 3, 2, 1, 2, 2, 2, 1, 2, 2, 2, 3, 3, 1, 1, 1, 1, 2, 1, 1, 3, 1, 3, 1, 3
+
+; report & export extra strings
+rpLeftH      DB "Left hand keys   : ", 0
+rpRightH     DB "Right hand keys  : ", 0
+rpAvgLat     DB "Avg latency (ms) : ", 0
+rpBestStrk   DB "Best key streak  : ", 0
+rpXpLvl      DB "XP Level         : ", 0
+rpBadges     DB "Badges unlocked  : ", 0
+csvHdr       DB "metric,value", 13, 10, 0
+csvKeyHdr    DB 13, 10, "ascii,key,count", 13, 10, 0
+jsOpen       DB "{", 13, 10, '  "totalKeys": ', 0
+jsVow        DB ',', 13, 10, '  "vowels": ', 0
+jsCon        DB ',', 13, 10, '  "consonants": ', 0
+jsWds        DB ',', 13, 10, '  "words": ', 0
+jsPeak       DB ',', 13, 10, '  "peakWpm": ', 0
+jsAvg        DB ',', 13, 10, '  "avgWpm": ', 0
+jsLat        DB ',', 13, 10, '  "avgLatencyMs": ', 0
+jsStrk       DB ',', 13, 10, '  "bestStreak": ', 0
+jsLH         DB ',', 13, 10, '  "leftHand": ', 0
+jsRH         DB ',', 13, 10, '  "rightHand": ', 0
+jsXP         DB ',', 13, 10, '  "xpScore": ', 0
+jsBadges     DB ',', 13, 10, '  "badgesUnlocked": ', 0
+jsClose      DB 13, 10, "}", 13, 10, 0
 
 ; ---- last-session comparison ----
 sVsLast      DB "VS LAST  ", 0
@@ -1346,6 +1516,188 @@ tn_shift:
     ret
 TrackNgram ENDP
 
+; ---- apply colour theme (themeIdx 0..3) ----
+ApplyTheme PROC USES esi edi
+    mov  eax, themeIdx
+    and  eax, 3
+    shl  eax, 5                     ; 8 DWORDs (32 bytes) per theme
+    lea  esi, themeTable[eax]
+    lea  edi, C_PAGE
+    mov  ecx, 8
+    cld
+    rep  movsd
+    ret
+ApplyTheme ENDP
+
+; ---- evaluate unlockable achievements and XP level ----
+UpdateBadges PROC USES ebx
+    mov  eax, totalKeys
+    imul eax, eax, 3
+    mov  edx, words
+    imul edx, edx, 10
+    add  eax, edx
+    mov  edx, bestStreak
+    shl  edx, 1
+    add  eax, edx
+    mov  xpScore, eax
+    xor  edx, edx
+    mov  ecx, 250
+    div  ecx
+    inc  eax
+    mov  xpLevel, eax
+
+    xor  ebx, ebx                   ; badge bitmask
+    xor  ecx, ecx                   ; unlocked count
+    cmp  totalKeys, 50
+    jb   ub_1
+    or   ebx, 1
+    inc  ecx
+ub_1:
+    cmp  wpmPeak, 60
+    jb   ub_2
+    or   ebx, 2
+    inc  ecx
+ub_2:
+    cmp  wpmPeak, 100
+    jb   ub_3
+    or   ebx, 4
+    inc  ecx
+ub_3:
+    cmp  bestStreak, 100
+    jb   ub_4
+    or   ebx, 8
+    inc  ecx
+ub_4:
+    cmp  totalKeys, 500
+    jb   ub_5
+    or   ebx, 16
+    inc  ecx
+ub_5:
+    mov  eax, digits
+    add  eax, symbols
+    cmp  eax, 20
+    jb   ub_done
+    or   ebx, 32
+    inc  ecx
+ub_done:
+    mov  badgesMask, ebx
+    mov  badgeCount, ecx
+    ret
+UpdateBadges ENDP
+
+; ---- track hand, finger, row, latency and streak for a key press ----
+TrackErgo PROC USES ebx esi kc:DWORD
+    ; 1. Streak tracking
+    mov  ebx, kc
+    cmp  ebx, 8                     ; Backspace resets current streak
+    jne  te_strk
+    mov  curStreak, 0
+    jmp  te_lat
+te_strk:
+    inc  curStreak
+    mov  eax, curStreak
+    cmp  eax, bestStreak
+    jbe  te_lat
+    mov  bestStreak, eax
+
+te_lat:                             ; 2. Inter-key latency & active time
+    invoke GetTickCount
+    mov  esi, eax
+    cmp  lastKeyTick, 0
+    je   te_settick
+    sub  eax, lastKeyTick
+    cmp  eax, 2000                  ; ignore pauses >= 2 seconds
+    jae  te_settick
+    test eax, eax
+    jz   te_settick
+    add  activeMs, eax
+    add  latSum, eax
+    inc  latCnt
+    mov  ecx, eax
+    cmp  minLatMs, 0
+    je   te_setmin
+    cmp  ecx, minLatMs
+    jae  te_avg
+te_setmin:
+    mov  minLatMs, ecx
+te_avg:
+    mov  eax, latSum
+    xor  edx, edx
+    div  latCnt
+    mov  avgLatMs, eax
+te_settick:
+    mov  lastKeyTick, esi
+
+    ; 3. Hand, Finger & Row classification
+    mov  eax, ebx
+    cmp  eax, ' '
+    jne  te_notspc
+    inc  fingerCnt[8*4]             ; thumb
+    inc  rowCnt[4*4]                ; space row
+    jmp  te_snd
+te_notspc:
+    cmp  eax, '0'
+    jb   te_chklet
+    cmp  eax, '9'
+    ja   te_chklet
+    inc  rowCnt[0*4]                ; number row
+    cmp  eax, '5'
+    ja   te_numr
+    cmp  eax, '0'
+    je   te_numr
+    inc  leftHand
+    inc  fingerCnt[2*4]
+    mov  ecx, 0
+    jmp  te_alt
+te_numr:
+    inc  rightHand
+    inc  fingerCnt[5*4]
+    mov  ecx, 1
+    jmp  te_alt
+te_chklet:
+    mov  eax, ebx
+    or   eax, 20h
+    sub  eax, 'a'
+    cmp  eax, 25
+    ja   te_other
+    movzx ecx, letterRow[eax]
+    inc  rowCnt[ecx*4]
+    movzx ecx, letterFinger[eax]
+    inc  fingerCnt[ecx*4]
+    cmp  ecx, 4
+    jae  te_letr
+    inc  leftHand
+    mov  ecx, 0
+    jmp  te_alt
+te_letr:
+    inc  rightHand
+    mov  ecx, 1
+te_alt:
+    cmp  lastHand, -1
+    je   te_sethand
+    cmp  lastHand, ecx
+    je   te_sethand
+    inc  handAlt
+te_sethand:
+    mov  lastHand, ecx
+    jmp  te_snd
+te_other:
+    inc  rowCnt[4*4]
+    inc  rightHand
+    inc  fingerCnt[7*4]
+
+te_snd:                             ; 4. Optional mechanical key click sound
+    cmp  soundOn, 0
+    je   te_done
+    mov  eax, ebx
+    and  eax, 1Fh
+    shl  eax, 4
+    add  eax, 600
+    invoke Beep, eax, 8
+te_done:
+    ret
+TrackErgo ENDP
+
 ; ---- count one typed character (kc = ASCII, vk = virtual key) ----
 CountChar PROC USES ebx kc:DWORD, vk:DWORD
     mov  ebx, kc
@@ -1398,6 +1750,7 @@ cc_other:
 
 cc_glyph:
     invoke TrackNgram, curCat, ebx  ; bigrams / trigrams
+    invoke TrackErgo, ebx           ; biomechanics, latency, streak & sound
                                     ; word counter: a run of letters/digits is one word
     mov  eax, curCat
     cmp  eax, CAT_VOWEL
@@ -1616,6 +1969,7 @@ us_cards:                           ; samples for the card sparklines
     inc  cardCount
 us_top5:
     invoke ComputeTop5
+    invoke UpdateBadges
     ret
 UpdateStats ENDP
 
@@ -1690,10 +2044,12 @@ NgramName ENDP
 NewTest PROC
     mov  eax, testIdx
     inc  eax
-    cmp  eax, NSENT
-    jb   nt_idx
-    xor  eax, eax
-nt_idx:
+    xor  edx, edx
+    mov  ecx, 3
+    div  ecx                        ; edx = (testIdx + 1) mod 3
+    mov  eax, testMode
+    imul eax, eax, 3
+    add  eax, edx
     mov  testIdx, eax
     mov  eax, sentences[eax*4]
     mov  testPtr, eax
@@ -1901,6 +2257,16 @@ dh_grad:
     invoke Cell, 2, 0, 25C6h, C_CYAN, C_KEEP
     invoke Text, 4, 0, ADDR sTitle, C_WHITE, C_KEEP
     invoke Text, 23, 0, ADDR sSubtitle, C_HDRTXT, C_KEEP
+    invoke Text, 59, 0, ADDR sHdrLvl, C_GOLD, C_KEEP
+    invoke Num, eax, 0, xpLevel, C_WHITE
+    mov  eax, xpLevel
+    dec  eax
+    cmp  eax, 4
+    jbe  dh_rnk
+    mov  eax, 4
+dh_rnk:
+    mov  eax, rankNames[eax*4]
+    invoke Text, 66, 0, eax, C_CYAN, C_KEEP
     cmp  paused, 0
     je   dh_live
     invoke Cell, 74, 0, 25CFh, C_GOLD, C_KEEP
@@ -2508,6 +2874,12 @@ DrawStatsLine PROC USES ebx
     invoke Percent, bsCount, totalKeys
     invoke Num, ebx, 27, eax, C_AMBER
     invoke Cell, eax, 27, '%', C_AMBER, C_KEEP
+    inc  eax
+    invoke Text, eax, 27, ADDR sStreakSt, C_MUTED, C_KEEP
+    invoke Num, eax, 27, bestStreak, C_GREEN
+    invoke Text, eax, 27, ADDR sLatSt, C_MUTED, C_KEEP
+    invoke Num, eax, 27, avgLatMs, C_CYAN
+    invoke Text, eax, 27, ADDR sMsUnit, C_MUTED, C_KEEP
     invoke DrawCompare
     ret
 DrawStatsLine ENDP
@@ -2735,7 +3107,7 @@ Delta ENDP
 
 ; ---- this session against the last one (right half of the stats line) ----
 DrawCompare PROC USES ebx
-    invoke Text, 59, 27, ADDR sVsLast, C_MUTED, C_KEEP
+    invoke Text, 68, 27, ADDR sVsLast, C_MUTED, C_KEEP
     cmp  hasLast, 0
     jne  dcm_have
     invoke Text, eax, 27, ADDR sFirstRun, C_DIM, C_KEEP
@@ -2774,12 +3146,11 @@ DrawTestView PROC USES ebx esi edi
 
     ; ---- the sentence: green = right, red = wrong, cyan = next ----
     invoke RBox, 2, 9, 96, 7, ADDR sBoxTest, C_BORDER, C_TEXT
-    invoke Text, 79, 9, ADDR sSentence, C_MUTED, C_KEEP
-    mov  ebx, eax
-    mov  eax, testIdx
-    inc  eax
-    invoke Num, ebx, 9, eax, C_TEXT
-    invoke Text, eax, 9, ADDR sOfSix, C_MUTED, C_KEEP
+    invoke Text, 68, 9, ADDR sModeLbl, C_MUTED, C_KEEP
+    mov  ecx, testMode
+    mov  edx, modeNames[ecx*4]
+    invoke Text, eax, 9, edx, C_GOLD, C_KEEP
+    invoke Text, eax, 9, ADDR sTabHint, C_MUTED, C_KEEP
     mov  eax, 92
     sub  eax, testLen
     shr  eax, 1
@@ -2895,14 +3266,165 @@ tv_again:
     ret
 DrawTestView ENDP
 
+; ---- biomechanics, rhythm & achievements screen (F6) ----
+DrawErgoView PROC USES ebx esi edi
+    LOCAL totH:DWORD, yRow:DWORD
+    mov  ebx, leftHand
+    add  ebx, rightHand
+    mov  totH, ebx
+
+    ; 4 top cards: Left Hand %, Right Hand %, Avg Latency ms, Key Streak
+    invoke Percent, leftHand, totH
+    invoke Card, 2, ADDR sCardLH, eax, C_CYAN, C_CYAN2, 0, 0, 0, 0
+    invoke Text, 4, 6, ADDR sSubKeys, C_MUTED, C_KEEP
+    invoke Num, eax, 6, leftHand, C_WHITE
+
+    invoke Percent, rightHand, totH
+    invoke Card, 26, ADDR sCardRH, eax, C_PURP, C_PURP2, 0, 0, 0, 0
+    invoke Text, 28, 6, ADDR sSubKeys, C_MUTED, C_KEEP
+    invoke Num, eax, 6, rightHand, C_WHITE
+    invoke Text, 40, 6, ADDR sSubAlt, C_MUTED, C_KEEP
+    invoke Num, eax, 6, handAlt, C_GREEN
+
+    invoke Card, 50, ADDR sCardLat, avgLatMs, C_AMBER, C_AMBER2, 0, 0, 0, 0
+    invoke Text, 52, 6, ADDR sSubMinLat, C_MUTED, C_KEEP
+    invoke Num, eax, 6, minLatMs, C_WHITE
+    invoke Text, eax, 6, ADDR sMsUnit, C_MUTED, C_KEEP
+
+    invoke Card, 74, ADDR sCardStrk, curStreak, C_GREEN, C_GREEN2, 0, 0, 0, 0
+    invoke Text, 76, 6, ADDR sSubBestSt, C_MUTED, C_KEEP
+    invoke Num, eax, 6, bestStreak, C_GOLD
+    invoke Text, eax, 6, ADDR sSubBadges, C_MUTED, C_KEEP
+    invoke Num, eax, 6, badgeCount, C_CYAN
+
+    ; Left panel: Finger Load (9 rows: L-Pinky..L-Index, R-Index..R-Pinky, Thumbs)
+    invoke RBox, 2, 9, 47, 12, ADDR sBoxFinger, C_BORDER, C_TEXT
+    xor  esi, esi
+de_floop:
+    cmp  esi, 9
+    jae  de_rows
+    lea  eax, [esi+11]
+    mov  yRow, eax
+    mov  eax, fingerNames[esi*4]
+    invoke Text, 4, yRow, eax, C_TEXT, C_KEEP
+    invoke Fill, 14, yRow, 22, 1, 2500h, C_TRACK, C_KEEP
+    invoke Percent, fingerCnt[esi*4], totalKeys
+    mov  edi, eax                   ; edi = percent
+    imul eax, eax, 22
+    xor  edx, edx
+    mov  ecx, 100
+    div  ecx
+    cmp  eax, 22
+    jbe  de_fbar
+    mov  eax, 22
+de_fbar:
+    mov  ebx, C_CYAN
+    cmp  esi, 4
+    jb   de_fcol
+    mov  ebx, C_PURP
+    cmp  esi, 8
+    jb   de_fcol
+    mov  ebx, C_GREEN
+de_fcol:
+    test eax, eax
+    jz   de_fnum
+    invoke Fill, 14, yRow, eax, 1, 2588h, ebx, C_KEEP
+de_fnum:
+    invoke NumR, 40, yRow, fingerCnt[esi*4], C_WHITE
+    invoke NumR, 45, yRow, edi, C_MUTED
+    invoke Cell, 46, yRow, '%', C_MUTED, C_KEEP
+    inc  esi
+    jmp  de_floop
+
+de_rows:
+    ; Right panel: Row Distribution + Rhythm & Cadence stats
+    invoke RBox, 51, 9, 47, 12, ADDR sBoxRows, C_BORDER, C_TEXT
+    xor  esi, esi
+de_rloop:
+    cmp  esi, 5
+    jae  de_rhy
+    lea  eax, [esi+11]
+    mov  yRow, eax
+    mov  eax, rowNames[esi*4]
+    invoke Text, 53, yRow, eax, C_TEXT, C_KEEP
+    invoke Percent, rowCnt[esi*4], totalKeys
+    mov  edi, eax
+    invoke Fill, 72, yRow, 14, 1, 2500h, C_TRACK, C_KEEP
+    imul eax, edi, 14
+    xor  edx, edx
+    mov  ecx, 100
+    div  ecx
+    test eax, eax
+    jz   de_rnum
+    invoke Fill, 72, yRow, eax, 1, 2588h, C_AMBER, C_KEEP
+de_rnum:
+    invoke NumR, 91, yRow, rowCnt[esi*4], C_WHITE
+    invoke NumR, 95, yRow, edi, C_MUTED
+    invoke Cell, 96, yRow, '%', C_MUTED, C_KEEP
+    inc  esi
+    jmp  de_rloop
+
+de_rhy:
+    invoke Text, 53, 17, ADDR sRhyActive, C_MUTED, C_KEEP
+    mov  ebx, eax
+    mov  eax, activeMs
+    xor  edx, edx
+    mov  ecx, 1000
+    div  ecx
+    invoke TimeMS, ebx, 17, eax, C_CYAN
+    invoke Text, 53, 18, ADDR sRhyBurst, C_MUTED, C_KEEP
+    invoke Num, eax, 18, wpmPeak, C_PURP
+    invoke Text, 53, 19, ADDR sRhyAlt, C_MUTED, C_KEEP
+    invoke Num, eax, 19, handAlt, C_GREEN
+
+    ; Bottom panel: Achievements & XP Badges (2 columns x 3 rows)
+    invoke RBox, 2, 21, 96, 6, ADDR sBoxBadges, C_BORDER, C_TEXT
+    invoke Text, 78, 21, ADDR sXpLbl, C_MUTED, C_KEEP
+    invoke Num, eax, 21, xpScore, C_GOLD
+    xor  esi, esi
+de_bloop:
+    cmp  esi, 6
+    jae  de_done
+    mov  eax, esi
+    and  eax, 1
+    imul ebx, eax, 47
+    add  ebx, 4                     ; x = 4 or 51
+    mov  eax, esi
+    shr  eax, 1
+    add  eax, 22                    ; y = 22, 23, 24
+    mov  yRow, eax
+    mov  ecx, esi
+    mov  eax, 1
+    shl  eax, cl
+    test badgesMask, eax
+    jz   de_locked
+    invoke Text, ebx, yRow, ADDR sUnlocked, C_OK, C_KEEP
+    mov  edx, badgeNames[esi*4]
+    add  ebx, 11
+    invoke Text, ebx, yRow, edx, C_WHITE, C_KEEP
+    jmp  de_bnext
+de_locked:
+    invoke Text, ebx, yRow, ADDR sLocked, C_DIM, C_KEEP
+    mov  edx, badgeNames[esi*4]
+    add  ebx, 11
+    invoke Text, ebx, yRow, edx, C_MUTED, C_KEEP
+de_bnext:
+    inc  esi
+    jmp  de_bloop
+de_done:
+    ret
+DrawErgoView ENDP
+
 ; ---- redraw every panel into the canvas, then flush once ----
 RenderAll PROC
     mov  animating, 0
     invoke UpdateStats
     invoke Fill, 0, 0, SCR_W, SCR_H, ' ', C_TEXT, C_PAGE
     invoke DrawHeader
-    cmp  viewMode, 0
-    jne  ra_test
+    cmp  viewMode, 1
+    je   ra_test
+    cmp  viewMode, 2
+    je   ra_ergo
     invoke DrawCards
     invoke DrawChips
     invoke DrawLastN
@@ -2913,6 +3435,9 @@ RenderAll PROC
     jmp  ra_bottom
 ra_test:
     invoke DrawTestView
+    jmp  ra_bottom
+ra_ergo:
+    invoke DrawErgoView
 ra_bottom:
     invoke DrawStatsLine
     invoke DrawButtons
@@ -3024,6 +3549,12 @@ BuildReport PROC USES ebx esi edi
     invoke AppLine, ADDR rpPeak, wpmPeak
     invoke AppLine, ADDR rpAvg, wpmAvg
     invoke AppLine, ADDR rpTest, testBest
+    invoke AppLine, ADDR rpLeftH, leftHand
+    invoke AppLine, ADDR rpRightH, rightHand
+    invoke AppLine, ADDR rpAvgLat, avgLatMs
+    invoke AppLine, ADDR rpBestStrk, bestStreak
+    invoke AppLine, ADDR rpXpLvl, xpLevel
+    invoke AppLine, ADDR rpBadges, badgeCount
     cmp  hasLast, 0
     je   br_nolast
     invoke AppLine, ADDR rpLastAvg, lastStats[ST_AVG*4]
@@ -3680,6 +4211,28 @@ DoReset PROC USES edi
     mov  tsHead, eax
     mov  tsCount, eax
     mov  wpmPeak, eax
+    mov  leftHand, eax
+    mov  rightHand, eax
+    mov  handAlt, eax
+    mov  lastHand, -1
+    mov  lastKeyTick, eax
+    mov  latSum, eax
+    mov  latCnt, eax
+    mov  avgLatMs, eax
+    mov  minLatMs, eax
+    mov  activeMs, eax
+    mov  curStreak, eax
+    mov  bestStreak, eax
+    mov  xpScore, eax
+    mov  xpLevel, 1
+    mov  badgesMask, eax
+    mov  badgeCount, eax
+    lea  edi, fingerCnt
+    mov  ecx, 9
+    rep  stosd
+    lea  edi, rowCnt
+    mov  ecx, 5
+    rep  stosd
     mov  lastLetter, -1
     mov  lastKeyCode, -1
     invoke GetTickCount
@@ -3689,7 +4242,78 @@ DoReset PROC USES edi
     ret
 DoReset ENDP
 
-; ---- write KeyReport.txt and KeyReport.html; openIt = show it in the browser ----
+; ---- report builder: append "label,value" for CSV ----
+AppCsvRow PROC pLabel:DWORD, val:DWORD
+    invoke AppStr, pLabel
+    invoke AppCh, ','
+    invoke AppNum, val
+    invoke AppStr, ADDR crlf
+    ret
+AppCsvRow ENDP
+
+; ---- assemble KeyReport.csv into rptBuf ----
+BuildCsv PROC USES esi
+    mov  appBase, OFFSET rptBuf
+    mov  rptLen, 0
+    invoke AppStr, ADDR csvHdr
+    invoke AppCsvRow, ADDR hlTotal, totalKeys
+    invoke AppCsvRow, ADDR hlVowels, vowels
+    invoke AppCsvRow, ADDR hlCons, consonants
+    invoke AppCsvRow, ADDR hlWords, words
+    invoke AppCsvRow, ADDR hlPeakW, wpmPeak
+    invoke AppCsvRow, ADDR hlAvg, wpmAvg
+    invoke AppStr, ADDR csvKeyHdr
+    xor  esi, esi
+bc_loop:
+    cmp  freq[esi*4], 0
+    je   bc_next
+    invoke AppNum, esi
+    invoke AppCh, ','
+    invoke KeyName, esi
+    invoke AppStr, eax
+    invoke AppCh, ','
+    invoke AppNum, freq[esi*4]
+    invoke AppStr, ADDR crlf
+bc_next:
+    inc  esi
+    cmp  esi, 256
+    jb   bc_loop
+    ret
+BuildCsv ENDP
+
+; ---- assemble KeyReport.json into rptBuf ----
+BuildJson PROC
+    mov  appBase, OFFSET rptBuf
+    mov  rptLen, 0
+    invoke AppStr, ADDR jsOpen
+    invoke AppNum, totalKeys
+    invoke AppStr, ADDR jsVow
+    invoke AppNum, vowels
+    invoke AppStr, ADDR jsCon
+    invoke AppNum, consonants
+    invoke AppStr, ADDR jsWds
+    invoke AppNum, words
+    invoke AppStr, ADDR jsPeak
+    invoke AppNum, wpmPeak
+    invoke AppStr, ADDR jsAvg
+    invoke AppNum, wpmAvg
+    invoke AppStr, ADDR jsLat
+    invoke AppNum, avgLatMs
+    invoke AppStr, ADDR jsStrk
+    invoke AppNum, bestStreak
+    invoke AppStr, ADDR jsLH
+    invoke AppNum, leftHand
+    invoke AppStr, ADDR jsRH
+    invoke AppNum, rightHand
+    invoke AppStr, ADDR jsXP
+    invoke AppNum, xpScore
+    invoke AppStr, ADDR jsBadges
+    invoke AppNum, badgeCount
+    invoke AppStr, ADDR jsClose
+    ret
+BuildJson ENDP
+
+; ---- write KeyReport.txt, .html, .csv and .json; openIt = show HTML in browser ----
 DoSave PROC openIt:DWORD
     invoke BuildReport
     invoke SaveFile, ADDR sReportFile, ADDR rptBuf, rptLen
@@ -3699,6 +4323,11 @@ DoSave PROC openIt:DWORD
     invoke SaveFile, ADDR sHtmlFile, ADDR htmlBuf, rptLen
     test eax, eax
     jz   ds_fail
+    invoke BuildCsv
+    invoke SaveFile, ADDR sCsvFile, ADDR rptBuf, rptLen
+    invoke BuildJson
+    invoke SaveFile, ADDR sJsonFile, ADDR rptBuf, rptLen
+    invoke BuildReport
     invoke SetMsg, ADDR sMsgSaved, C_OK
     cmp  openIt, 0
     je   ds_done
@@ -3766,13 +4395,45 @@ da_autooff:
     invoke SetMsg, ADDR sMsgAutoOff, C_RED
     ret
 da_view:
-    xor  viewMode, 1
-    cmp  viewMode, 0
-    je   da_dash
+    cmp  eax, 5
+    jne  da_ergo
+    cmp  viewMode, 1
+    je   da_to_dash
+    mov  viewMode, 1
     invoke SetMsg, ADDR sMsgTest, C_CYAN
     ret
-da_dash:
+da_ergo:
+    cmp  eax, 6
+    jne  da_theme
+    cmp  viewMode, 2
+    je   da_to_dash
+    mov  viewMode, 2
+    invoke SetMsg, ADDR sMsgErgo, C_CYAN
+    ret
+da_to_dash:
+    mov  viewMode, 0
     invoke SetMsg, ADDR sMsgDash, C_CYAN
+    ret
+da_theme:
+    cmp  eax, 7
+    jne  da_sound
+    mov  eax, themeIdx
+    inc  eax
+    and  eax, 3
+    mov  themeIdx, eax
+    invoke ApplyTheme
+    mov  eax, themeIdx
+    mov  eax, themeMsgs[eax*4]
+    invoke SetMsg, eax, C_GREEN
+    ret
+da_sound:
+    xor  soundOn, 1
+    cmp  soundOn, 0
+    je   da_sndoff
+    invoke SetMsg, ADDR sMsgSndOn, C_OK
+    ret
+da_sndoff:
+    invoke SetMsg, ADDR sMsgSndOff, C_MUTED
     ret
 DoAction ENDP
 
@@ -3817,8 +4478,34 @@ hk_f4:
     ret
 hk_f5:
     cmp  ebx, VK_F5
-    jne  hk_left
+    jne  hk_f6
     invoke DoAction, 5
+    ret
+hk_f6:
+    cmp  ebx, VK_F6
+    jne  hk_f7
+    invoke DoAction, 6
+    ret
+hk_f7:
+    cmp  ebx, VK_F7
+    jne  hk_f8
+    invoke DoAction, 7
+    ret
+hk_f8:
+    cmp  ebx, VK_F8
+    jne  hk_tab
+    invoke DoAction, 8
+    ret
+hk_tab:
+    cmp  ebx, VK_TAB
+    jne  hk_left
+    cmp  viewMode, 1
+    jne  hk_left
+    mov  eax, testMode
+    inc  eax
+    and  eax, 3
+    mov  testMode, eax
+    invoke NewTest
     ret
 hk_left:
     cmp  ebx, VK_LEFT
