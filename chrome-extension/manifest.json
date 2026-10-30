@@ -2,11 +2,12 @@
   "manifest_version": 3,
   "name": "KeyPressMonitor — Real-Time Keyboard Analytics & Typing Dashboard",
   "short_name": "KeyPressMonitor",
-  "version": "2.0.0",
+  "version": "2.1.0",
   "description": "Real-time keyboard telemetry: vowel/consonant counts, A-Z histogram, QWERTY heatmap, n-grams, hand/finger biomechanics, rhythm & typing test.",
   "permissions": [
     "storage",
-    "tabs"
+    "tabs",
+    "scripting"
   ],
   "host_permissions": [
     "<all_urls>"

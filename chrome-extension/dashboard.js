@@ -166,6 +166,8 @@ function render(s) {
   curState = s;
   document.documentElement.setAttribute('data-theme', s.theme || 'midnight');
   document.getElementById('lblSound').textContent = s.soundOn ? 'Sound:On' : 'Sound:Off';
+  const hudBtn = document.getElementById('lblHud');
+  if (hudBtn) hudBtn.textContent = (s.hudOn !== false) ? 'HUD:On' : 'HUD:Off';
 
   const { xp, level, rank, badges } = computeXPAndBadges(s);
   document.getElementById('hdrLevel').textContent = 'LVL ' + level;
@@ -443,12 +445,28 @@ document.addEventListener('DOMContentLoaded', () => {
   }, 300);
 
   // Buttons
-  document.getElementById('btnReset').addEventListener('click', () => {
-    chrome.runtime.sendMessage({ type: 'KPM_RESET' }, (res) => {
+  function doResetAll() {
+    chrome.runtime.sendMessage({ type: 'KPM_RESET', clearAll: true }, (res) => {
       if (res && res.state) render(res.state);
-      showToast('✓ Counters reset');
+      resetTypingTest(false);
+      showToast('✓ All records refreshed & cleared to 0');
     });
-  });
+  }
+
+  document.getElementById('btnReset').addEventListener('click', doResetAll);
+  const hdrReset = document.getElementById('btnHeaderReset');
+  if (hdrReset) hdrReset.addEventListener('click', doResetAll);
+
+  const hudToggle = document.getElementById('btnHud');
+  if (hudToggle) {
+    hudToggle.addEventListener('click', () => {
+      const next = (curState && curState.hudOn === false) ? true : false;
+      chrome.runtime.sendMessage({ type: 'KPM_SET_PREFS', hudOn: next }, (res) => {
+        if (res && res.state) render(res.state);
+        showToast(next ? '✓ Floating webpage HUD enabled' : '✗ Floating webpage HUD hidden');
+      });
+    });
+  }
 
   document.getElementById('btnExport').addEventListener('click', exportReports);
 

@@ -16,6 +16,7 @@ const ROW_MAP = {
 function defaultState() {
   return {
     paused: false,
+    hudOn: true,
     theme: 'midnight',
     soundOn: false,
     nView: 32,
@@ -74,9 +75,27 @@ chrome.storage.local.get(['kpmState'], (res) => {
   }
 });
 
+// Auto-inject content.js into already-open tabs when extension installs or reloads
+function injectIntoExistingTabs() {
+  if (!chrome.scripting || !chrome.tabs) return;
+  chrome.tabs.query({}, (tabs) => {
+    for (const tab of tabs) {
+      if (tab.id && tab.url && /^https?:\/\//i.test(tab.url)) {
+        chrome.scripting.executeScript({
+          target: { tabId: tab.id },
+          files: ['content.js']
+        }).catch(() => {});
+      }
+    }
+  });
+}
+
+chrome.runtime.onInstalled.addListener(injectIntoExistingTabs);
+chrome.runtime.onStartup.addListener(injectIntoExistingTabs);
+
 function saveState() {
   chrome.storage.local.set({ kpmState: state });
-  const badgeText = state.paused ? '||' : (state.wpmNow > 0 ? String(state.wpmNow) : '');
+  const badgeText = state.paused ? '||' : (state.wpmNow > 0 ? String(state.wpmNow) : (state.totalKeys > 0 ? String(state.totalKeys) : ''));
   chrome.action.setBadgeText({ text: badgeText });
   chrome.action.setBadgeBackgroundColor({ color: state.paused ? '#CA8A04' : '#7C3AED' });
 }
@@ -89,7 +108,7 @@ function updateLiveWpm(now) {
   if (state.wpmPeak > state.allTimeBestWpm) state.allTimeBestWpm = state.wpmPeak;
 
   const elapsedMs = Math.max(1000, now - state.startTick);
-  if (elapsedMs >= 3000) {
+  if (elapsedMs >= 1500 && state.totalKeys > 0) {
     state.wpmAvg = Math.round((state.totalKeys * 12000) / elapsedMs);
   }
 }
@@ -98,7 +117,6 @@ function recordKeyEvent(payload) {
   if (state.paused) return state;
   const now = Date.now();
   const key = payload.key || '';
-  const code = payload.code || '';
 
   state.totalKeys++;
   state.tsRing.push(now);
@@ -128,8 +146,7 @@ function recordKeyEvent(payload) {
   state.lastKeyCode = ascii;
 
   // Frequency count
-  const freqKey = disp.length === 1 ? disp : disp;
-  state.freq[freqKey] = (state.freq[freqKey] || 0) + 1;
+  state.freq[disp] = (state.freq[disp] || 0) + 1;
 
   // Virtual key for heatmap
   const vk = (key.length === 1 ? key.toUpperCase() : disp);
@@ -243,15 +260,17 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
     updateLiveWpm(Date.now());
     sendResponse({ state });
   } else if (msg.type === 'KPM_RESET') {
-    const keepBest = state.allTimeBestWpm;
-    const keepTest = state.allTimeTestBest;
     const keepTheme = state.theme;
     const keepSound = state.soundOn;
+    const keepHud = state.hudOn;
+    const keepAllWpm = msg.clearAll ? 0 : state.allTimeBestWpm;
+    const keepAllTest = msg.clearAll ? 0 : state.allTimeTestBest;
     state = defaultState();
-    state.allTimeBestWpm = keepBest;
-    state.allTimeTestBest = keepTest;
     state.theme = keepTheme;
     state.soundOn = keepSound;
+    state.hudOn = keepHud;
+    state.allTimeBestWpm = keepAllWpm;
+    state.allTimeTestBest = keepAllTest;
     saveState();
     sendResponse({ state });
   } else if (msg.type === 'KPM_TOGGLE_PAUSE') {
@@ -262,6 +281,7 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
     if (typeof msg.nView === 'number') state.nView = Math.max(8, Math.min(64, msg.nView));
     if (msg.theme) state.theme = msg.theme;
     if (typeof msg.soundOn === 'boolean') state.soundOn = msg.soundOn;
+    if (typeof msg.hudOn === 'boolean') state.hudOn = msg.hudOn;
     if (typeof msg.testBest === 'number') {
       if (msg.testBest > state.testBest) state.testBest = msg.testBest;
       if (msg.testBest > state.allTimeTestBest) state.allTimeTestBest = msg.testBest;
