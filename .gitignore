@@ -4,4 +4,7 @@
 *.pdb
 KeyReport.txt
 KeyReport.html
+KeyReport.csv
+KeyReport.json
 KeyStats.dat
+KeyPressMonitor-Chrome-Extension.zip
