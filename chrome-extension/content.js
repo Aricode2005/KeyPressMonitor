@@ -3,8 +3,12 @@
 // and displays a sleek, freely draggable and resizable floating HUD with 1-click Reset.
 
 (function () {
-  if (window.__kpmContentLoaded) return;
-  window.__kpmContentLoaded = true;
+  // Remove any stale HUD elements from previous extension reloads in this tab
+  document.querySelectorAll('#kpm-floating-hud-host').forEach((el) => el.remove());
+
+  if (window.__kpmCleanup) {
+    try { window.__kpmCleanup(); } catch (_) {}
+  }
 
   let hudHost = null;
   let hudRefs = {};
@@ -55,6 +59,8 @@
 
   function createHud() {
     if (!isTopFrame || hudHost || !document.body) return;
+    // Ensure no duplicate exists in the DOM
+    document.querySelectorAll('#kpm-floating-hud-host').forEach((el) => el.remove());
     hudHost = document.createElement('div');
     hudHost.id = 'kpm-floating-hud-host';
     hudHost.style.cssText = 'position:fixed;bottom:16px;right:16px;z-index:2147483647;font-family:Segoe UI,system-ui,sans-serif;user-select:none;touch-action:none;';
@@ -376,7 +382,7 @@
   } catch (_) {}
 
   // Capture keystrokes in real-time
-  window.addEventListener('keydown', (e) => {
+  function onKeyDown(e) {
     try {
       // Never log password inputs for security & Chrome Web Store compliance
       const el = e.target;
@@ -393,7 +399,16 @@
         if (res && res.state) updateHud(res.state);
       });
     } catch (_) {
-      // Extension context invalidated on reload
+      // Extension context invalidated on reload — self-remove stale HUD and listener
+      window.removeEventListener('keydown', onKeyDown, true);
+      if (hudHost) { hudHost.remove(); hudHost = null; }
     }
-  }, true);
+  }
+
+  window.addEventListener('keydown', onKeyDown, true);
+
+  window.__kpmCleanup = () => {
+    window.removeEventListener('keydown', onKeyDown, true);
+    if (hudHost) { hudHost.remove(); hudHost = null; }
+  };
 })();
