@@ -433,6 +433,13 @@ document.addEventListener('DOMContentLoaded', () => {
   initStaticDOM();
   resetTypingTest(false);
 
+  // If running as a standalone web app (e.g. on Render), show the "Get Chrome Extension (.zip)" button
+  const isRealExtension = !!(window.chrome && window.chrome.runtime && window.chrome.runtime.id);
+  const dlBtn = document.getElementById('btnDownloadExt');
+  if (dlBtn && !isRealExtension) {
+    dlBtn.style.display = 'inline-flex';
+  }
+
   chrome.runtime.sendMessage({ type: 'KPM_GET_STATE' }, (res) => {
     if (res && res.state) render(res.state);
   });
@@ -564,13 +571,20 @@ document.addEventListener('DOMContentLoaded', () => {
       setTimeout(() => cap.classList.remove('ripple'), 220);
     }
 
-    // Send key to background state
-    chrome.runtime.sendMessage({
-      type: 'KPM_KEY',
-      payload: { key: e.key, code: e.code }
-    }, (res) => {
-      if (res && res.state) render(res.state);
-    });
+    // Send key to background state (in standalone web mode, content.js already records it)
+    const isRealExt = !!(window.chrome && window.chrome.runtime && window.chrome.runtime.id);
+    if (isRealExt) {
+      chrome.runtime.sendMessage({
+        type: 'KPM_KEY',
+        payload: { key: e.key, code: e.code }
+      }, (res) => {
+        if (res && res.state) render(res.state);
+      });
+    } else {
+      chrome.runtime.sendMessage({ type: 'KPM_GET_STATE' }, (res) => {
+        if (res && res.state) render(res.state);
+      });
+    }
 
     // If Typing Test view is active, handle sentence input
     if (viewMode === 1) {

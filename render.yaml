@@ -1,0 +1,10 @@
+services:
+  - type: web
+    name: keypressmonitor
+    env: static
+    buildCommand: ""
+    staticPublishPath: ./chrome-extension
+    routes:
+      - type: rewrite
+        source: /
+        destination: /popup.html

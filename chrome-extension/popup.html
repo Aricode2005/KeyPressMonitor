@@ -15,6 +15,7 @@
       <span class="brand-sub">MASM x86 · Chrome Telemetry Edition</span>
     </div>
     <div class="hdr-right">
+      <a href="KeyPressMonitor-Chrome-Extension.zip" download class="pill-btn purp" id="btnDownloadExt" style="text-decoration:none;padding:2px 8px;font-size:11px;display:none" title="Download the Chrome Extension (.zip) to track typing across all websites"><span>⬇ Get Chrome Extension (.zip)</span></a>
       <button class="pill-btn red" id="btnHeaderReset" title="Refresh & Clear All Records (F1)" style="padding:2px 8px;font-size:11px"><span>↻ Refresh / Clear All</span></button>
       <div class="xp-pill">
         <span class="xp-lvl" id="hdrLevel">LVL 1</span>
@@ -268,6 +269,8 @@
     </div>
   </main>
 
+  <script src="web-polyfill.js"></script>
   <script src="dashboard.js"></script>
+  <script src="content.js"></script>
 </body>
 </html>

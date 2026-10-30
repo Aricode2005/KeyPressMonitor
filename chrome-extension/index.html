@@ -1,0 +1,276 @@
+<!DOCTYPE html>
+<html lang="en" data-theme="midnight">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>KeyPressMonitor — Real-Time Keystroke Analytics</title>
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+  <!-- Header -->
+  <header class="header">
+    <div class="brand">
+      <span class="brand-diamond">◆</span>
+      <span class="brand-title">KEY PRESS MONITOR</span>
+      <span class="brand-sub">MASM x86 · Chrome Telemetry Edition</span>
+    </div>
+    <div class="hdr-right">
+      <a href="KeyPressMonitor-Chrome-Extension.zip" download class="pill-btn purp" id="btnDownloadExt" style="text-decoration:none;padding:2px 8px;font-size:11px;display:none" title="Download the Chrome Extension (.zip) to track typing across all websites"><span>⬇ Get Chrome Extension (.zip)</span></a>
+      <button class="pill-btn red" id="btnHeaderReset" title="Refresh & Clear All Records (F1)" style="padding:2px 8px;font-size:11px"><span>↻ Refresh / Clear All</span></button>
+      <div class="xp-pill">
+        <span class="xp-lvl" id="hdrLevel">LVL 1</span>
+        <span class="xp-rank" id="hdrRank">NOVICE</span>
+      </div>
+      <div class="status-badge" id="hdrStatus">
+        <span class="dot"></span>
+        <span id="hdrStatusTxt">LIVE</span>
+      </div>
+      <div style="font-family:Consolas,monospace;color:#fff">
+        TIME <b id="hdrTime">00:00</b>
+      </div>
+    </div>
+  </header>
+
+  <main class="container">
+    <!-- VIEW 0: MAIN DASHBOARD -->
+    <section id="viewDash">
+      <div class="cards-grid">
+        <div class="card">
+          <div class="card-title">Vowels</div>
+          <div class="card-val" style="color:var(--green)" id="valVowels">0</div>
+          <div class="card-sub"><span id="pctVowels" style="color:var(--green)">0</span>% of letters</div>
+        </div>
+        <div class="card">
+          <div class="card-title">Consonants</div>
+          <div class="card-val" style="color:var(--amber)" id="valCons">0</div>
+          <div class="card-sub"><span id="pctCons" style="color:var(--amber)">0</span>% of letters</div>
+        </div>
+        <div class="card">
+          <div class="card-title">Total Keys</div>
+          <div class="card-val" style="color:var(--cyan)" id="valTotal">0</div>
+          <div class="card-sub">keys this session</div>
+        </div>
+        <div class="card">
+          <div class="card-title">Speed · WPM</div>
+          <div class="card-val" style="color:var(--purp)" id="valWpm">0</div>
+          <div class="card-sub">peak <b id="valPeak" style="color:#fff">0</b> · avg <b id="valAvg" style="color:#fff">0</b></div>
+        </div>
+      </div>
+
+      <!-- Chips & Mix Bar -->
+      <div class="chips-row">
+        <div class="chips-list">
+          <div class="chip">DIGITS <b id="chDigits" style="color:var(--cyan)">0</b></div>
+          <div class="chip">SPACES <b id="chSpaces">0</b></div>
+          <div class="chip">SYMBOLS <b id="chSymbols" style="color:var(--purp)">0</b></div>
+          <div class="chip">OTHER <b id="chOthers">0</b></div>
+          <div class="chip">WORDS <b id="chWords" style="color:var(--green)">0</b></div>
+        </div>
+        <div class="mix-wrap">
+          <span style="color:var(--green)">V</span>
+          <div class="mix-bar">
+            <div class="mix-v" id="mixV" style="width:50%"></div>
+            <div class="mix-c" id="mixC" style="width:50%"></div>
+          </div>
+          <span style="color:var(--amber)">C</span>
+        </div>
+      </div>
+
+      <!-- Last N Characters -->
+      <div class="panel">
+        <div class="panel-hdr">
+          <span>LAST N CHARACTERS</span>
+          <div class="n-controls">
+            <span class="muted">N = <b id="valN" style="color:var(--cyan)">32</b></span>
+            <button class="n-btn" id="btnNDec">◀</button>
+            <button class="n-btn" id="btnNInc">▶</button>
+          </div>
+        </div>
+        <div class="lastn-row">
+          <div class="lastn-chars" id="lastNBox"></div>
+          <div style="white-space:nowrap;color:var(--muted)">
+            LAST KEY <b id="valLastKey" style="color:#fff">-</b>
+            ASCII <b id="valLastAscii" style="color:var(--cyan)">0</b>
+          </div>
+        </div>
+      </div>
+
+      <!-- Middle Grid: Left (Histogram + WPM History), Right (Heatmap + Top 5) -->
+      <div class="mid-grid">
+        <div>
+          <div class="panel">
+            <div class="panel-hdr">
+              <span>LETTER FREQUENCY A–Z</span>
+              <span class="muted">● <b style="color:var(--green)">vowel</b> ● <b style="color:var(--amber)">consonant</b> · max <b id="histMax" style="color:#fff">0</b></span>
+            </div>
+            <div class="hist-bars" id="histBars"></div>
+          </div>
+
+          <div class="panel" style="margin-bottom:4px">
+            <div class="panel-hdr">
+              <span>WPM HISTORY (last 52 s)</span>
+              <span class="muted">max <b id="wpmHistMax" style="color:#fff">20</b> WPM</span>
+            </div>
+            <svg class="wpm-svg" viewBox="0 0 520 60" preserveAspectRatio="none">
+              <polygon id="wpmArea" fill="var(--purp2)" fill-opacity="0.32" points="0,60 520,60"></polygon>
+              <polyline id="wpmLine" fill="none" stroke="var(--purp)" stroke-width="2" points=""></polyline>
+            </svg>
+          </div>
+        </div>
+
+        <div>
+          <div class="panel">
+            <div class="panel-hdr">
+              <span>KEYBOARD HEATMAP</span>
+              <span class="muted">cold 🟦🟩🟨🟧🟥 hot</span>
+            </div>
+            <div class="kb-wrap" id="kbWrap"></div>
+          </div>
+
+          <div class="panel" style="margin-bottom:4px">
+            <div class="panel-hdr">
+              <span>TOP 5 KEYS · BIGRAMS · TRIGRAMS</span>
+            </div>
+            <table class="top5-table">
+              <thead>
+                <tr><th>#</th><th>KEY</th><th style="text-align:right">CNT</th><th>BIGRAM</th><th style="text-align:right">CNT</th><th>TRIGRAM</th><th style="text-align:right">CNT</th></tr>
+              </thead>
+              <tbody id="top5Body"></tbody>
+            </table>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- VIEW 1: TYPING TEST (F5) -->
+    <section id="viewTest" class="hidden">
+      <div class="cards-grid">
+        <div class="card">
+          <div class="card-title">Speed · WPM</div>
+          <div class="card-val" style="color:var(--purp)" id="ttWpm">0</div>
+          <div class="card-sub">best <b id="ttBest" style="color:#fff">0</b> · all-time <b id="ttAllBest" style="color:var(--gold)">0</b></div>
+        </div>
+        <div class="card">
+          <div class="card-title">Accuracy %</div>
+          <div class="card-val" style="color:var(--green)" id="ttAcc">100</div>
+          <div class="card-sub">keys typed right</div>
+        </div>
+        <div class="card">
+          <div class="card-title">Errors</div>
+          <div class="card-val" style="color:var(--amber)" id="ttErr">0</div>
+          <div class="card-sub">wrong keys typed</div>
+        </div>
+        <div class="card">
+          <div class="card-title">Time (s)</div>
+          <div class="card-val" style="color:var(--cyan)" id="ttTime">0</div>
+          <div class="card-sub">mode: <b id="ttModeName" style="color:var(--gold)">STANDARD</b></div>
+        </div>
+      </div>
+
+      <div class="panel">
+        <div class="panel-hdr">
+          <span>TYPING TEST — TYPE THIS SENTENCE</span>
+          <div>
+            <button class="n-btn" id="btnCycleMode">Tab: Change Mode</button>
+            <button class="n-btn" id="btnNextSent">Enter: Next Sentence</button>
+          </div>
+        </div>
+        <div class="test-sentence" id="ttSentence"></div>
+        <div class="mix-bar" style="height:6px;margin-top:8px">
+          <div class="mix-v" id="ttProg" style="width:0%;background:var(--cyan)"></div>
+        </div>
+      </div>
+
+      <div class="panel">
+        <div class="panel-hdr"><span>INSTRUCTIONS & RESULT</span></div>
+        <div id="ttStatus" style="color:var(--muted);line-height:1.6">
+          Start typing anywhere in this window! Green = right, Red = mistake, Backspace = fix it, Tab = switch mode (Standard, Quotes, Code, Numbers).
+        </div>
+      </div>
+    </section>
+
+    <!-- VIEW 2: BIOMECHANICS, RHYTHM & ACHIEVEMENTS (F6) -->
+    <section id="viewErgo" class="hidden">
+      <div class="cards-grid">
+        <div class="card">
+          <div class="card-title">Left Hand %</div>
+          <div class="card-val" style="color:var(--cyan)" id="erLH">0%</div>
+          <div class="card-sub">keys: <b id="erLHKeys" style="color:#fff">0</b></div>
+        </div>
+        <div class="card">
+          <div class="card-title">Right Hand %</div>
+          <div class="card-val" style="color:var(--purp)" id="erRH">0%</div>
+          <div class="card-sub">keys: <b id="erRHKeys" style="color:#fff">0</b> · alt: <b id="erAlt" style="color:var(--green)">0</b></div>
+        </div>
+        <div class="card">
+          <div class="card-title">Avg Latency (ms)</div>
+          <div class="card-val" style="color:var(--amber)" id="erLat">0</div>
+          <div class="card-sub">fastest <b id="erMinLat" style="color:#fff">0</b> ms</div>
+        </div>
+        <div class="card">
+          <div class="card-title">Key Streak</div>
+          <div class="card-val" style="color:var(--green)" id="erStreak">0</div>
+          <div class="card-sub">best <b id="erBestStreak" style="color:var(--gold)">0</b> · XP <b id="erXP" style="color:var(--cyan)">0</b></div>
+        </div>
+      </div>
+
+      <div class="ergo-grid">
+        <div class="panel">
+          <div class="panel-hdr"><span>FINGER LOAD BREAKDOWN</span></div>
+          <div id="fingerBars"></div>
+        </div>
+        <div class="panel">
+          <div class="panel-hdr"><span>KEYBOARD ROW DISTRIBUTION</span></div>
+          <div id="rowBars"></div>
+          <div style="margin-top:10px;font-family:Consolas,monospace;font-size:11px;color:var(--muted);line-height:1.7">
+            <div>Active Typing Time : <b id="erActiveTime" style="color:var(--cyan)">00:00</b></div>
+            <div>Hand Alternations  : <b id="erAlt2" style="color:var(--green)">0</b></div>
+          </div>
+        </div>
+      </div>
+
+      <div class="panel">
+        <div class="panel-hdr">
+          <span>ACHIEVEMENTS & UNLOCKABLE BADGES</span>
+          <span class="muted" id="erBadgeSummary">0 / 6 Unlocked</span>
+        </div>
+        <div class="badges-grid" id="badgesGrid"></div>
+      </div>
+    </section>
+
+    <!-- Bottom Stats Strip -->
+    <div class="stats-strip">
+      <div>
+        LONGEST WORD <b id="stLongest">0</b>
+        BACKSPACES <b id="stBs">0</b>
+        CORRECTION RATE <b id="stErr">0%</b>
+        STREAK <b id="stStreak" style="color:var(--green)">0</b>
+        LATENCY <b id="stLat" style="color:var(--cyan)">0ms</b>
+      </div>
+      <div id="statusToast" style="color:var(--cyan)">Type anywhere on any webpage or inside this dashboard</div>
+    </div>
+
+    <!-- Action Button Bar -->
+    <div class="btn-bar">
+      <div class="btn-group">
+        <button class="pill-btn" id="btnReset"><kbd>F1</kbd><span>Reset</span></button>
+        <button class="pill-btn" id="btnExport"><kbd>F2</kbd><span>Export HTML/CSV/JSON</span></button>
+        <button class="pill-btn" id="btnPause"><kbd>F3</kbd><span id="lblPause">Pause</span></button>
+        <button class="pill-btn purp" id="btnTest"><kbd>F5</kbd><span id="lblTest">Test</span></button>
+        <button class="pill-btn cyan" id="btnErgo"><kbd>F6</kbd><span>Bio/XP</span></button>
+        <button class="pill-btn green" id="btnTheme"><kbd>F7</kbd><span id="lblTheme">Theme</span></button>
+        <button class="pill-btn" id="btnSound"><kbd>F8</kbd><span id="lblSound">Sound:Off</span></button>
+        <button class="pill-btn" id="btnHud"><span id="lblHud">HUD:On</span></button>
+      </div>
+      <div class=" all-right" style="display:flex;gap:6px">
+        <button class="pill-btn" id="btnHelp" title="How to use KeyPressMonitor"><span>? Guide</span></button>
+        <button class="pill-btn cyan" id="btnOpenTab" title="Open in full browser tab"><span>⛶ Full Tab</span></button>
+      </div>
+    </div>
+  </main>
+
+  <script src="web-polyfill.js"></script>
+  <script src="dashboard.js"></script>
+  <script src="content.js"></script>
+</body>
+</html>
