@@ -90,7 +90,12 @@ function injectIntoExistingTabs() {
   });
 }
 
-chrome.runtime.onInstalled.addListener(injectIntoExistingTabs);
+chrome.runtime.onInstalled.addListener((details) => {
+  injectIntoExistingTabs();
+  if (details && details.reason === 'install') {
+    chrome.tabs.create({ url: chrome.runtime.getURL('guide.html') });
+  }
+});
 chrome.runtime.onStartup.addListener(injectIntoExistingTabs);
 
 function saveState() {

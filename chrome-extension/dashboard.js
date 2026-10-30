@@ -505,6 +505,13 @@ document.addEventListener('DOMContentLoaded', () => {
     chrome.tabs.create({ url: chrome.runtime.getURL('popup.html') });
   });
 
+  const helpBtn = document.getElementById('btnHelp');
+  if (helpBtn) {
+    helpBtn.addEventListener('click', () => {
+      chrome.tabs.create({ url: chrome.runtime.getURL('guide.html') });
+    });
+  }
+
   document.getElementById('btnNDec').addEventListener('click', () => {
     const n = Math.max(8, ((curState && curState.nView) || 32) - 4);
     chrome.runtime.sendMessage({ type: 'KPM_SET_PREFS', nView: n }, (res) => {
