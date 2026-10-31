@@ -47,6 +47,12 @@ Type anywhere in the console (or across any webpage with the Chrome Extension) a
 | Multi-format Export (F2) | Writes `KeyReport.txt`, `KeyReport.html` (with charts, opened in browser), `KeyReport.csv` and `KeyReport.json` |
 | Compare with last session | Each session is saved to `KeyStats.dat` on exit. The next run shows `VS LAST` (average and peak WPM with up/down arrows, all-time best) |
 | Key-press ripple | The pressed key flashes white on the heatmap and a ring spreads to the keys around it; the card numbers count up at ~30 fps |
+| Help overlay (F9) | One screen with every key (with the live autosave, theme and sound state) and what each screen and panel shows |
+| Session replay (F10) | Every live key is recorded with its timing (`KeySession.kpm`, written on exit). F10 replays the last session on the dashboard at real speed, so a demo never depends on live typing (pauses over 3 s are shortened) |
+| Ghost race | The typing test keeps your best run of each sentence (`KeyGhost.dat`): a ▲ ghost marker moves under the sentence at your old pace, with "you are N chars ahead/behind", and the result says whether you beat it |
+| Heatmap modes (Up / Down) | The keyboard heatmap switches between **frequency**, **speed** (average ms to reach each key; slow keys are hot) and **test misses** (keys you got wrong in the typing test). Click the heatmap to cycle too |
+| Text analysis (F6 twice) | Shannon entropy of your letters (bits/letter), % overlap with English letter shares, a chi-squared test against English (df 25), and the Caesar shift that makes the text most English-like (it decodes ROT-n). Computed on the x87 FPU (`FYL2X` for log2), also in both reports |
+| Self-test (`/selftest`) | `KeyMonitor.exe /selftest` types a known sentence through the real counting code and checks 15 results (vowels, consonants, frequency, last N, words, n-grams...). Prints PASS/FAIL and exits with the number of failures; CI runs it on every push |
 | Chrome Extension (Manifest V3) | Full browser extension in `chrome-extension/` with popup & full-tab dashboard, live webpage keystroke telemetry, all 3 views, 4 themes, Web Audio synth clicks, and JSON/CSV export |
 
 ## Controls
@@ -58,17 +64,24 @@ Type anywhere in the console (or across any webpage with the Chrome Extension) a
 | F3 | Pause / resume counting |
 | F4 | Toggle autosave of the reports on exit |
 | F5 | Typing test screen / back to dashboard (`Enter` = next sentence, `Tab` = cycle mode) |
-| F6 | Ergonomics, Biomechanics, Rhythm & Achievements screen / back to dashboard |
+| F6 | Biomechanics & achievements screen, press again for text analysis, again for the dashboard |
 | F7 | Cycle colour theme (`Midnight` → `Cyberpunk` → `Matrix` → `Nord`) |
 | F8 | Toggle mechanical key click sound |
+| F9 | Help: every key and screen |
+| F10 | Replay the last session (again = stop) |
+| Up / Down | Heatmap mode: frequency / speed / test misses |
 | Left / Right, mouse wheel | Change N (8 to 64) |
 | ESC | Quit and print the final report |
 
-All buttons can also be clicked with the mouse.
+The buttons at the bottom can be clicked with the mouse (F1, F2, F3, F5, F6, F9, ESC); F4, F7 and F8 are listed in the F9 help.
 
 | Typing test (F5) | HTML report (F2) |
 |------------------|------------------|
 | ![Typing test](screenshots/typing-test.png) | ![HTML report](screenshots/html-report.png) |
+| **Ghost race (F5)** | **Text analysis (F6, F6)** |
+| ![Ghost race](screenshots/ghost-race.png) | ![Text analysis](screenshots/text-analysis.png) |
+| **Biomechanics & XP (F6)** | **Help (F9)** |
+| ![Biomechanics](screenshots/biomechanics.png) | ![Help](screenshots/help.png) |
 
 ---
 
@@ -109,6 +122,12 @@ link /subsystem:console KeyMonitor.obj kernel32.lib
 
 ```bat
 KeyMonitor.exe
+```
+
+Check that the counters work (no window needed, prints PASS/FAIL):
+
+```bat
+KeyMonitor.exe /selftest
 ```
 
 **Best in Windows Terminal** (built into Windows 11; free from the Microsoft Store on Windows 10). It also runs in the classic console with slightly simpler bars.
@@ -169,7 +188,18 @@ Last N chars     : [asy, see you at the demo]
 
 ```
 KeyPressMonitor/
-├── KeyMonitor.asm          # 32-bit MASM native console dashboard (kernel32 only)
+├── KeyMonitor.asm          # 32-bit MASM program: header, INCLUDE list, main loop
+├── src/                    # the program's modules, included in this order:
+│   ├── defs.inc            #   API prototypes and constants
+│   ├── data.inc            #   variables, tables and text
+│   ├── render.inc          #   canvas primitives, VT / 16-colour output
+│   ├── stats.inc           #   counting: classify, n-grams, biomechanics, WPM
+│   ├── session.inc         #   typing test, last-session stats
+│   ├── selftest.inc        #   KeyMonitor.exe /selftest
+│   ├── dashboard.inc       #   dashboard, typing test, biomechanics, help screens
+│   ├── reports.inc         #   text and HTML reports
+│   ├── actions.inc         #   actions and keyboard / mouse input
+│   └── console.inc         #   console setup and restore
 ├── build.bat               # one-step MASM build (x86 Native Tools prompt)
 ├── package-extension.bat   # packs chrome-extension/ into a Web Store .zip
 ├── chrome-extension/       # Manifest V3 Chrome Extension
@@ -181,7 +211,7 @@ KeyPressMonitor/
 │   ├── styles.css          # 4 themes (Midnight, Cyberpunk, Matrix, Nord)
 │   └── icons/              # 16x16, 48x48, 128x128 extension icons
 ├── screenshots/            # images used in this README
-├── .github/workflows/      # CI: builds KeyMonitor.asm on every push
+├── .github/workflows/      # CI: builds KeyMonitor.asm and runs the self-test on every push
 ├── CONTRIBUTING.md
 └── LICENSE
 ```
