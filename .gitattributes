@@ -2,3 +2,4 @@
 *.asm text eol=crlf
 *.bat text eol=crlf
 *.png binary
+*.inc text eol=crlf
